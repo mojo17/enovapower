@@ -4,10 +4,12 @@
 
 - [Authentication](#authentication)
 - [Downloading Usage Data](#downloading-usage-data)
-  - [CSV (DataFrame)](#csv-dataframe)
+  - [CSV](#csv)
   - [Green Button XML](#green-button-xml)
   - [Long Date Ranges](#long-date-ranges)
+  - [Latest Reading](#latest-reading)
 - [Parsing Local CSV Files](#parsing-local-csv-files)
+- [Async Client](#async-client)
 - [Local Storage (SQLite)](#local-storage-sqlite)
   - [Seeding Historical Data](#seeding-historical-data)
   - [Incremental Updates](#incremental-updates)
@@ -16,7 +18,7 @@
   - [Downloading Tariffs](#downloading-tariffs)
   - [Storing Tariffs](#storing-tariffs)
   - [Querying Tariffs](#querying-tariffs)
-- [DataFrame Schema](#dataframe-schema)
+- [Data Models](#data-models)
 - [Error Handling](#error-handling)
 - [Limitations](#limitations)
 
@@ -27,13 +29,14 @@
 The library authenticates against the Enova Power My Account portal using your account number and password — the same credentials you use at [myaccount.enovapower.com](https://myaccount.enovapower.com).
 
 ```python
-from enova import EnovaClient
+from enovapower import EnovaClient
 
 client = EnovaClient()
 client.login("1234567890", "your_password")
 
-# The meter ID is extracted automatically during login
-print(client.meter_id)  # e.g. "111111"
+# The meter ID and account number are extracted automatically during login
+print(client.meter_id)        # e.g. "111111"
+print(client.account_number)  # e.g. "1234567890"
 ```
 
 The client maintains a `requests.Session` internally, so the login session persists across multiple download calls. If the session expires, you will need to call `login()` again.
@@ -42,18 +45,19 @@ The client maintains a `requests.Session` internally, so the login session persi
 
 ## Downloading Usage Data
 
-### CSV (DataFrame)
+### CSV
 
-The default format returns a pandas DataFrame with hourly kWh readings and TOU (Time of Use) peak totals.
+The default format returns a list of `UsageReading` objects with hourly kWh readings and TOU (Time of Use) peak totals.
 
 ```python
 from datetime import date
 
-df = client.download_usage(
+readings = client.download_usage(
     from_date=date(2026, 2, 25),
     to_date=date(2026, 3, 26),
 )
-print(df.head())
+for r in readings:
+    print(f"{r.date}: {r.total} kWh (on-peak: {r.total_on_peak})")
 ```
 
 ### Green Button XML
@@ -74,14 +78,24 @@ print(xml_data[:200])  # raw XML string
 The portal limits each request to 90 days. For longer ranges, use `download_usage_chunked()` which automatically splits the request into 90-day windows and concatenates the results:
 
 ```python
-df = client.download_usage_chunked(
+readings = client.download_usage_chunked(
     from_date=date(2025, 6, 1),
     to_date=date(2026, 3, 26),
 )
-print(f"{len(df)} days of data")
+print(f"{len(readings)} days of data")
 ```
 
-Duplicate rows at chunk boundaries are automatically removed.
+Duplicate readings at chunk boundaries are automatically removed.
+
+### Latest Reading
+
+To get just the most recent day's data (useful for dashboards and integrations):
+
+```python
+latest = client.get_latest_usage()
+if latest:
+    print(f"{latest.date}: {latest.total} kWh")
+```
 
 ---
 
@@ -91,11 +105,55 @@ If you already have a CSV file downloaded from the portal, you can parse it dire
 
 ```python
 from pathlib import Path
-from enova.client import parse_csv
+from enovapower.client import parse_csv
 
 csv_text = Path("SmartMeter1234567890_2026-03-2712.47.47.csv").read_text()
-df = parse_csv(csv_text)
-print(df.head())
+readings = parse_csv(csv_text)
+for r in readings:
+    print(f"{r.date}: {r.total} kWh")
+```
+
+---
+
+## Async Client
+
+The `AsyncEnovaClient` provides the same functionality using `aiohttp` for async I/O, making it suitable for Home Assistant integrations and other async applications.
+
+```python
+import asyncio
+from enovapower import AsyncEnovaClient
+
+async def main():
+    async with AsyncEnovaClient() as client:
+        await client.async_login("1234567890", "your_password")
+
+        # Download usage data
+        readings = await client.async_download_usage(
+            from_date=date(2026, 2, 25),
+            to_date=date(2026, 3, 26),
+        )
+
+        # Get the latest reading
+        latest = await client.async_get_latest_usage()
+
+        # Download tariff rates
+        rates = await client.async_download_tariff(
+            from_date=date(2026, 2, 25),
+            to_date=date(2026, 3, 26),
+        )
+
+asyncio.run(main())
+```
+
+The async client accepts an optional `aiohttp.ClientSession` for environments that manage their own sessions (e.g. Home Assistant):
+
+```python
+import aiohttp
+from enovapower import AsyncEnovaClient
+
+session = aiohttp.ClientSession()
+client = AsyncEnovaClient(session=session)
+# session lifecycle is managed externally
 ```
 
 ---
@@ -105,7 +163,7 @@ print(df.head())
 `UsageStore` is an optional SQLite-backed layer that accumulates usage data locally. It composes with `EnovaClient` — the client works standalone without it.
 
 ```python
-from enova import EnovaClient, UsageStore
+from enovapower import EnovaClient, UsageStore
 
 client = EnovaClient()
 client.login("1234567890", "your_password")
@@ -123,8 +181,8 @@ The database file (`*.db`) is excluded from version control via `.gitignore`.
 
 ```python
 with UsageStore("usage.db") as store:
-    df = store.seed(client)              # default: last 12 months
-    df = store.seed(client, months=6)    # last 6 months
+    readings = store.seed(client)              # default: last 12 months
+    readings = store.seed(client, months=6)    # last 6 months
 ```
 
 ### Incremental Updates
@@ -148,10 +206,10 @@ with UsageStore("usage.db") as store:
     print(f"Data up to: {latest}")
 
     # Load all data for a meter
-    df = store.load("111111")
+    readings = store.load("111111")
 
     # Load a specific date range
-    df = store.load("111111", from_date=date(2026, 1, 1), to_date=date(2026, 3, 1))
+    readings = store.load("111111", from_date=date(2026, 1, 1), to_date=date(2026, 3, 1))
 ```
 
 ---
@@ -172,17 +230,17 @@ rates = client.download_tariff(
     to_date=date(2026, 3, 26),
 )
 for r in rates:
-    print(f"{r['plan']} / {r['name']}: {r['price']} cents/kWh")
+    print(f"{r.plan} / {r.name}: {r.price} cents/kWh")
 ```
 
-Each rate dict contains: `start_date`, `end_date`, `plan`, `name`, `price` (cents/kWh), and `description`.
+Each `TariffRate` has: `start_date`, `end_date`, `plan`, `name`, `price` (cents/kWh), and `description`.
 
 ### Storing Tariffs
 
 Tariff rates are stored in a separate `tariff` table in the SQLite database:
 
 ```python
-from enova import EnovaClient, UsageStore
+from enovapower import EnovaClient, UsageStore
 
 client = EnovaClient()
 client.login("1234567890", "your_password")
@@ -197,34 +255,46 @@ with UsageStore("usage.db") as store:
 ```python
 with UsageStore("usage.db") as store:
     # All tariffs
-    df = store.load_tariff()
+    rates = store.load_tariff()
 
     # Filter by plan
-    df = store.load_tariff(plan="Time-of-Use")
+    rates = store.load_tariff(plan="Time-of-Use")
 
     # Filter by date (tariffs valid on a specific date)
-    df = store.load_tariff(as_of=date(2026, 3, 1))
+    rates = store.load_tariff(as_of=date(2026, 3, 1))
 ```
 
 ---
 
-## DataFrame Schema
+## Data Models
 
-The DataFrame returned by `download_usage()` and `parse_csv()` has the following columns:
+### UsageReading
 
-| Column | Type | Description |
+Returned by `download_usage()`, `parse_csv()`, and `store.load()`.
+
+| Field | Type | Description |
 |---|---|---|
-| `date` | `datetime64` | Reading date |
-| `h01` | `float64` | kWh usage for 1 AM hour |
-| `h02` | `float64` | kWh usage for 2 AM hour |
-| ... | ... | ... |
-| `h24` | `float64` | kWh usage for 12 AM (midnight) hour |
-| `total_on_peak` | `float64` | Total on-peak kWh for the day |
-| `total_mid_peak` | `float64` | Total mid-peak kWh for the day |
-| `total_off_peak` | `float64` | Total off-peak kWh for the day |
-| `total` | `float64` | Sum of h01 through h24 |
+| `date` | `date` | Reading date |
+| `hourly` | `dict[str, float]` | Hourly kWh values keyed `h01` through `h24` (1 AM through midnight) |
+| `total_on_peak` | `float` | Total on-peak kWh for the day |
+| `total_mid_peak` | `float` | Total mid-peak kWh for the day |
+| `total_off_peak` | `float` | Total off-peak kWh for the day |
+| `total` | `float` | Sum of all hourly values |
 
-The hour columns `h01`–`h24` map to 1 AM through 12 AM (midnight). Ontario's electricity system operates in Eastern Standard Time, so during Daylight Saving Time the values may differ slightly from billed amounts.
+Ontario's electricity system operates in Eastern Standard Time, so during Daylight Saving Time the values may differ slightly from billed amounts.
+
+### TariffRate
+
+Returned by `download_tariff()` and `store.load_tariff()`.
+
+| Field | Type | Description |
+|---|---|---|
+| `start_date` | `date` | Start of rate validity period |
+| `end_date` | `date` | End of rate validity period |
+| `plan` | `str` | Plan name (e.g. "Time-of-Use") |
+| `name` | `str` | Rate name (e.g. "TOU Off-peak") |
+| `price` | `float` | Price in cents per kWh |
+| `description` | `str` | When the rate applies |
 
 ---
 
@@ -233,7 +303,7 @@ The hour columns `h01`–`h24` map to 1 AM through 12 AM (midnight). Ontario's e
 The library raises specific exceptions for different failure modes:
 
 ```python
-from enova.client import EnovaError, EnovaAuthError
+from enovapower.client import EnovaError, EnovaAuthError, EnovaConnectionError
 
 try:
     client.login("bad_account", "bad_password")
@@ -249,9 +319,10 @@ except EnovaError as e:
 | Exception | When |
 |---|---|
 | `EnovaAuthError` | Login credentials are wrong, CSRF token missing, or session redirect to login page |
+| `EnovaConnectionError` | Network failure or timeout reaching the portal |
 | `EnovaError` | Date range exceeds 90 days, from > to, not logged in, or download form not found in response |
 
-`EnovaAuthError` is a subclass of `EnovaError`, so catching `EnovaError` handles both.
+All exceptions inherit from `EnovaError`, so catching `EnovaError` handles all cases.
 
 ---
 

@@ -6,13 +6,11 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-import pandas as pd
+from enovapower.client import EnovaClient
+from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 
-from enova.client import EnovaClient
-
-HOUR_COLS = [f"h{i:02d}" for i in range(1, 25)]
 TOU_COLS = ["total_on_peak", "total_mid_peak", "total_off_peak"]
-DATA_COLS = HOUR_COLS + TOU_COLS + ["total"]
+DATA_COLS = HOUR_KEYS + TOU_COLS + ["total"]
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -65,7 +63,7 @@ class UsageStore:
             store.seed(client)           # backfill last 12 months
             store.update(client)         # incremental update
             latest = store.latest_record_date("111111")
-            df = store.load("111111")
+            readings = store.load("111111")
     """
 
     def __init__(self, db_path: str | Path = "enova_usage.db") -> None:
@@ -85,25 +83,28 @@ class UsageStore:
         """Close the database connection."""
         self._conn.close()
 
-    def save(self, meter_id: str, df: pd.DataFrame) -> int:
-        """Save a DataFrame of usage data to the database.
+    def save(self, meter_id: str, readings: list[UsageReading]) -> int:
+        """Save usage readings to the database.
 
         Existing rows for the same meter_id + date are replaced (upsert).
 
         Args:
             meter_id: The meter identifier.
-            df: DataFrame with the standard usage schema (date, h01..h24, TOU, total).
+            readings: List of UsageReading objects.
 
         Returns:
             Number of rows saved.
         """
-        if df.empty:
+        if not readings:
             return 0
 
         rows = []
-        for _, row in df.iterrows():
-            date_str = pd.Timestamp(row["date"]).strftime("%Y-%m-%d")
-            values = [meter_id, date_str] + [float(row[c]) for c in DATA_COLS]
+        for r in readings:
+            values = (
+                [meter_id, r.date.isoformat()]
+                + [r.hourly.get(k, 0.0) for k in HOUR_KEYS]
+                + [r.total_on_peak, r.total_mid_peak, r.total_off_peak, r.total]
+            )
             rows.append(values)
 
         self._conn.executemany(_INSERT, rows)
@@ -115,8 +116,8 @@ class UsageStore:
         meter_id: str,
         from_date: date | None = None,
         to_date: date | None = None,
-    ) -> pd.DataFrame:
-        """Load usage data from the database as a DataFrame.
+    ) -> list[UsageReading]:
+        """Load usage data from the database.
 
         Args:
             meter_id: The meter identifier.
@@ -124,7 +125,7 @@ class UsageStore:
             to_date: Optional end date filter (inclusive).
 
         Returns:
-            DataFrame with the standard usage schema, ordered by date.
+            List of UsageReading ordered by date.
         """
         query = "SELECT date, {cols} FROM usage WHERE meter_id = ?".format(
             cols=", ".join(DATA_COLS),
@@ -143,13 +144,19 @@ class UsageStore:
         cursor = self._conn.execute(query, params)
         rows = cursor.fetchall()
 
-        if not rows:
-            return pd.DataFrame()
+        readings: list[UsageReading] = []
+        for row in rows:
+            hourly = {HOUR_KEYS[i]: row[1 + i] for i in range(24)}
+            readings.append(UsageReading(
+                date=date.fromisoformat(row[0]),
+                hourly=hourly,
+                total_on_peak=row[25],
+                total_mid_peak=row[26],
+                total_off_peak=row[27],
+                total=row[28],
+            ))
 
-        columns = ["date"] + DATA_COLS
-        df = pd.DataFrame(rows, columns=columns)
-        df["date"] = pd.to_datetime(df["date"])
-        return df
+        return readings
 
     def latest_record_date(self, meter_id: str) -> date | None:
         """Return the most recent date stored for a meter, or None if empty.
@@ -169,14 +176,13 @@ class UsageStore:
             return date.fromisoformat(row[0])
         return None
 
-    def save_tariff(self, rates: list[dict]) -> int:
+    def save_tariff(self, rates: list[TariffRate]) -> int:
         """Save tariff rates to the database.
 
         Existing rows for the same (start_date, end_date, plan, name) are replaced.
 
         Args:
-            rates: List of dicts with keys: start_date, end_date, plan,
-                   name, price, description.
+            rates: List of TariffRate objects.
 
         Returns:
             Number of rows saved.
@@ -187,12 +193,12 @@ class UsageStore:
         rows = []
         for r in rates:
             rows.append((
-                r["start_date"].isoformat(),
-                r["end_date"].isoformat(),
-                r["plan"],
-                r["name"],
-                float(r["price"]),
-                r.get("description", ""),
+                r.start_date.isoformat(),
+                r.end_date.isoformat(),
+                r.plan,
+                r.name,
+                float(r.price),
+                r.description,
             ))
 
         self._conn.executemany(_INSERT_TARIFF, rows)
@@ -203,7 +209,7 @@ class UsageStore:
         self,
         plan: str | None = None,
         as_of: date | None = None,
-    ) -> pd.DataFrame:
+    ) -> list[TariffRate]:
         """Load tariff rates from the database.
 
         Args:
@@ -211,10 +217,12 @@ class UsageStore:
             as_of: Optional date filter — returns only tariffs valid on this date.
 
         Returns:
-            DataFrame with columns: start_date, end_date, plan, name, price,
-            description. Ordered by start_date, plan, name.
+            List of TariffRate ordered by start_date, plan, name.
         """
-        query = "SELECT start_date, end_date, plan, name, price, description FROM tariff WHERE 1=1"
+        query = (
+            "SELECT start_date, end_date, plan, name, price, description"
+            " FROM tariff WHERE 1=1"
+        )
         params: list = []
 
         if plan is not None:
@@ -230,16 +238,19 @@ class UsageStore:
         cursor = self._conn.execute(query, params)
         rows = cursor.fetchall()
 
-        if not rows:
-            return pd.DataFrame()
+        return [
+            TariffRate(
+                start_date=date.fromisoformat(row[0]),
+                end_date=date.fromisoformat(row[1]),
+                plan=row[2],
+                name=row[3],
+                price=row[4],
+                description=row[5] or "",
+            )
+            for row in rows
+        ]
 
-        columns = ["start_date", "end_date", "plan", "name", "price", "description"]
-        df = pd.DataFrame(rows, columns=columns)
-        df["start_date"] = pd.to_datetime(df["start_date"])
-        df["end_date"] = pd.to_datetime(df["end_date"])
-        return df
-
-    def seed(self, client: EnovaClient, months: int = 12) -> pd.DataFrame:
+    def seed(self, client: EnovaClient, months: int = 12) -> list[UsageReading]:
         """Download historical data and store it.
 
         Downloads the last ``months`` months of data using the client
@@ -250,7 +261,7 @@ class UsageStore:
             months: Number of months of history to download (default 12).
 
         Returns:
-            The downloaded DataFrame.
+            The downloaded readings.
 
         Raises:
             enova.client.EnovaError: If the client is not logged in.
@@ -258,12 +269,12 @@ class UsageStore:
         to_date = date.today()
         from_date = _months_ago(to_date, months)
 
-        df = client.download_usage_chunked(from_date, to_date)
-        if not df.empty:
-            self.save(client.meter_id, df)
-        return df
+        readings = client.download_usage_chunked(from_date, to_date)
+        if readings:
+            self.save(client.meter_id, readings)
+        return readings
 
-    def update(self, client: EnovaClient) -> pd.DataFrame:
+    def update(self, client: EnovaClient) -> list[UsageReading]:
         """Download new data since the last stored record and save it.
 
         If no prior data exists, falls back to ``seed()``.
@@ -272,7 +283,7 @@ class UsageStore:
             client: An authenticated EnovaClient.
 
         Returns:
-            DataFrame of newly downloaded data (may be empty).
+            List of newly downloaded readings (may be empty).
 
         Raises:
             enova.client.EnovaError: If the client is not logged in.
@@ -285,12 +296,12 @@ class UsageStore:
         to_date = date.today()
 
         if from_date > to_date:
-            return pd.DataFrame()
+            return []
 
-        df = client.download_usage_chunked(from_date, to_date)
-        if not df.empty:
-            self.save(client.meter_id, df)
-        return df
+        readings = client.download_usage_chunked(from_date, to_date)
+        if readings:
+            self.save(client.meter_id, readings)
+        return readings
 
 
 def _months_ago(ref: date, months: int) -> date:

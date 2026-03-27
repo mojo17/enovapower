@@ -7,9 +7,10 @@ import io
 import re
 from datetime import date, timedelta
 
-import pandas as pd
 import requests
 from bs4 import BeautifulSoup
+
+from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 
 BASE_URL = "https://myaccount.enovapower.com"
 MAX_RANGE_DAYS = 90
@@ -22,7 +23,7 @@ class EnovaClient:
 
         client = EnovaClient()
         client.login("your_account_number", "your_password")
-        df = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
+        readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     """
 
     def __init__(self) -> None:
@@ -104,21 +105,25 @@ class EnovaClient:
     def meter_id(self) -> str | None:
         return self._meter_id
 
+    @property
+    def account_number(self) -> str | None:
+        return self._account_number
+
     def download_usage(
         self,
         from_date: date,
         to_date: date,
         fmt: str = "csv",
-    ) -> pd.DataFrame | str:
+    ) -> list[UsageReading] | str:
         """Download smart meter usage data for a date range.
 
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
-            fmt: "csv" returns a parsed DataFrame; "xml" returns raw XML string.
+            fmt: "csv" returns a list of UsageReading; "xml" returns raw XML string.
 
         Returns:
-            pd.DataFrame for CSV format, raw XML string for XML format.
+            list[UsageReading] for CSV format, raw XML string for XML format.
 
         Raises:
             EnovaError: On download failure or invalid parameters.
@@ -192,7 +197,7 @@ class EnovaClient:
         self,
         from_date: date,
         to_date: date,
-    ) -> pd.DataFrame:
+    ) -> list[UsageReading]:
         """Download usage data for ranges exceeding 90 days by chunking requests.
 
         Args:
@@ -200,26 +205,28 @@ class EnovaClient:
             to_date: End date (inclusive).
 
         Returns:
-            pd.DataFrame with all data concatenated.
+            list[UsageReading] with all data concatenated and deduplicated.
         """
-        chunks: list[pd.DataFrame] = []
+        all_readings: list[UsageReading] = []
+        seen_dates: set[date] = set()
         current = from_date
         while current <= to_date:
             chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            df = self.download_usage(current, chunk_end)
-            if isinstance(df, pd.DataFrame) and not df.empty:
-                chunks.append(df)
+            result = self.download_usage(current, chunk_end)
+            if isinstance(result, list):
+                for reading in result:
+                    if reading.date not in seen_dates:
+                        all_readings.append(reading)
+                        seen_dates.add(reading.date)
             current = chunk_end + timedelta(days=1)
 
-        if not chunks:
-            return pd.DataFrame()
-        return pd.concat(chunks, ignore_index=True).drop_duplicates(subset=["date"])
+        return all_readings
 
     def download_tariff(
         self,
         from_date: date,
         to_date: date,
-    ) -> list[dict]:
+    ) -> list[TariffRate]:
         """Download tariff rates from the Price Comparison page.
 
         Args:
@@ -227,8 +234,7 @@ class EnovaClient:
             to_date: End date of the usage period to query (inclusive).
 
         Returns:
-            List of tariff rate dicts with keys:
-            start_date, end_date, plan, name, price, description.
+            List of TariffRate objects.
 
         Raises:
             EnovaError: On download failure or invalid parameters.
@@ -258,16 +264,35 @@ class EnovaClient:
         resp.raise_for_status()
         return parse_tariff_html(resp.text)
 
+    def get_latest_usage(self) -> UsageReading | None:
+        """Download the most recent usage reading.
 
-def parse_csv(raw_csv: str) -> pd.DataFrame:
-    """Parse the Enova CSV export into a tidy DataFrame.
+        Fetches the last 3 days of data (to account for portal lag)
+        and returns the most recent reading.
+
+        Returns:
+            The latest UsageReading, or None if no data available.
+
+        Raises:
+            EnovaError: If not logged in.
+        """
+        to_date = date.today()
+        from_date = to_date - timedelta(days=3)
+        readings = self.download_usage(from_date, to_date)
+        if isinstance(readings, list) and readings:
+            return readings[-1]
+        return None
+
+
+def parse_csv(raw_csv: str) -> list[UsageReading]:
+    """Parse the Enova CSV export into a list of UsageReading objects.
 
     The raw CSV has columns like:
       "Reading Date", "1 am kWh Usage", ..., "12 pm kWh Usage",
       "[touInquiry_download_Total_TOU_ON_Peak_Consumption]", ...
 
-    Returns a DataFrame with columns:
-      date, h01..h24, total_on_peak, total_mid_peak, total_off_peak, total
+    Returns:
+        List of UsageReading with hourly kWh, TOU totals, and computed total.
     """
     reader = csv.reader(io.StringIO(raw_csv))
     next(reader)  # skip header
@@ -283,31 +308,36 @@ def parse_csv(raw_csv: str) -> pd.DataFrame:
         rows.append(row)
 
     if not rows:
-        return pd.DataFrame()
+        return []
 
-    # Build the DataFrame
-    hour_cols = [f"h{i:02d}" for i in range(1, 25)]
     tou_cols = ["total_on_peak", "total_mid_peak", "total_off_peak"]
-    col_names = ["date"] + hour_cols + tou_cols
+    col_count = 1 + 24 + len(tou_cols)  # date + 24 hours + 3 TOU
 
-    records = []
+    readings: list[UsageReading] = []
     for row in rows:
-        # Pad row if needed (some rows have trailing empty fields)
-        padded = row + [""] * (len(col_names) - len(row))
-        record = {}
-        record["date"] = padded[0].strip().strip('"')
-        for i, col in enumerate(hour_cols):
-            val = padded[i + 1].strip().strip('"')
-            record[col] = float(val) if val else 0.0
-        for i, col in enumerate(tou_cols):
-            val = padded[25 + i].strip().strip('"') if len(padded) > 25 + i else ""
-            record[col] = float(val) if val else 0.0
-        record["total"] = sum(record[c] for c in hour_cols)
-        records.append(record)
+        padded = row + [""] * (col_count - len(row))
+        date_str = padded[0].strip().strip('"')
 
-    df = pd.DataFrame(records)
-    df["date"] = pd.to_datetime(df["date"])
-    return df
+        hourly: dict[str, float] = {}
+        for i, key in enumerate(HOUR_KEYS):
+            val = padded[i + 1].strip().strip('"')
+            hourly[key] = float(val) if val else 0.0
+
+        tou_values = []
+        for i in range(len(tou_cols)):
+            val = padded[25 + i].strip().strip('"') if len(padded) > 25 + i else ""
+            tou_values.append(float(val) if val else 0.0)
+
+        readings.append(UsageReading(
+            date=date.fromisoformat(date_str),
+            hourly=hourly,
+            total_on_peak=tou_values[0],
+            total_mid_peak=tou_values[1],
+            total_off_peak=tou_values[2],
+            total=sum(hourly.values()),
+        ))
+
+    return readings
 
 
 _HEADING_RE = re.compile(
@@ -321,15 +351,13 @@ _PLAN_NAMES = {
 }
 
 
-def parse_tariff_html(html: str) -> list[dict]:
-    """Parse the Price Comparison HTML page into tariff rate dicts.
+def parse_tariff_html(html: str) -> list[TariffRate]:
+    """Parse the Price Comparison HTML page into TariffRate objects.
 
-    Returns a list of dicts with keys:
-        start_date (date), end_date (date), plan (str),
-        name (str), price (float, cents/kWh), description (str).
+    Returns a list of TariffRate with plan, name, price, dates, description.
     """
     soup = BeautifulSoup(html, "html.parser")
-    rates: list[dict] = []
+    rates: list[TariffRate] = []
 
     for heading in soup.find_all("h5"):
         strong = heading.find("strong")
@@ -363,14 +391,14 @@ def parse_tariff_html(html: str) -> list[dict]:
             else:
                 description = ""
 
-            rates.append({
-                "start_date": start_date,
-                "end_date": end_date,
-                "plan": plan,
-                "name": name,
-                "price": price,
-                "description": description,
-            })
+            rates.append(TariffRate(
+                start_date=start_date,
+                end_date=end_date,
+                plan=plan,
+                name=name,
+                price=price,
+                description=description,
+            ))
 
     return rates
 
@@ -388,3 +416,7 @@ class EnovaError(Exception):
 
 class EnovaAuthError(EnovaError):
     """Authentication failure."""
+
+
+class EnovaConnectionError(EnovaError):
+    """Network or connection failure."""
