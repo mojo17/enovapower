@@ -1,9 +1,10 @@
-"""Client for downloading electricity usage data from Enova Power's My Account portal."""
+"""Client for downloading electricity usage and tariff data from Enova Power's My Account portal."""
 
 from __future__ import annotations
 
 import csv
 import io
+import re
 from datetime import date, timedelta
 
 import pandas as pd
@@ -214,6 +215,49 @@ class EnovaClient:
             return pd.DataFrame()
         return pd.concat(chunks, ignore_index=True).drop_duplicates(subset=["date"])
 
+    def download_tariff(
+        self,
+        from_date: date,
+        to_date: date,
+    ) -> list[dict]:
+        """Download tariff rates from the Price Comparison page.
+
+        Args:
+            from_date: Start date of the usage period to query (inclusive).
+            to_date: End date of the usage period to query (inclusive).
+
+        Returns:
+            List of tariff rate dicts with keys:
+            start_date, end_date, plan, name, price, description.
+
+        Raises:
+            EnovaError: On download failure or invalid parameters.
+        """
+        if (to_date - from_date).days > MAX_RANGE_DAYS:
+            raise EnovaError(
+                f"Date range cannot exceed {MAX_RANGE_DAYS} days."
+            )
+        if to_date < from_date:
+            raise EnovaError("from_date must be before to_date")
+        if not self._meter_id:
+            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
+
+        resp = self.session.get(
+            f"{BASE_URL}/app/capricorn",
+            params={
+                "para": "smartMeterPriceCompV3",
+                "inquiryType": "hydro",
+                "fromYear": str(from_date.year),
+                "fromMonth": f"{from_date.month:02d}",
+                "fromDay": f"{from_date.day:02d}",
+                "toYear": str(to_date.year),
+                "toMonth": f"{to_date.month:02d}",
+                "toDay": f"{to_date.day:02d}",
+            },
+        )
+        resp.raise_for_status()
+        return parse_tariff_html(resp.text)
+
 
 def parse_csv(raw_csv: str) -> pd.DataFrame:
     """Parse the Enova CSV export into a tidy DataFrame.
@@ -264,6 +308,78 @@ def parse_csv(raw_csv: str) -> pd.DataFrame:
     df = pd.DataFrame(records)
     df["date"] = pd.to_datetime(df["date"])
     return df
+
+
+_HEADING_RE = re.compile(
+    r"^(.+?)\s+Pricing:\s+(\w+ \d{2}, \d{4})\s*-\s*(\w+ \d{2}, \d{4})$"
+)
+
+_PLAN_NAMES = {
+    "Time-of-Use": "Time-of-Use",
+    "Ultra-Low Overnight": "Ultra-Low Overnight",
+    "Tiered Price Plan": "Tiered",
+}
+
+
+def parse_tariff_html(html: str) -> list[dict]:
+    """Parse the Price Comparison HTML page into tariff rate dicts.
+
+    Returns a list of dicts with keys:
+        start_date (date), end_date (date), plan (str),
+        name (str), price (float, cents/kWh), description (str).
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    rates: list[dict] = []
+
+    for heading in soup.find_all("h5"):
+        strong = heading.find("strong")
+        text = (strong.get_text(strip=True) if strong else heading.get_text(strip=True))
+        match = _HEADING_RE.match(text)
+        if not match:
+            continue
+
+        raw_plan, raw_start, raw_end = match.groups()
+        plan = _PLAN_NAMES.get(raw_plan, raw_plan)
+        start_date = _parse_heading_date(raw_start)
+        end_date = _parse_heading_date(raw_end)
+
+        # Find the next table after this heading
+        table = heading.find_next("table")
+        if not table:
+            continue
+
+        for tr in table.find_all("tr"):
+            cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+            if len(cells) < 2:
+                continue
+
+            name = cells[0]
+            price = float(cells[1])
+
+            if plan == "Tiered" and len(cells) >= 4:
+                description = f"{cells[2]} - {cells[3]} kWh"
+            elif len(cells) >= 3:
+                description = cells[2]
+            else:
+                description = ""
+
+            rates.append({
+                "start_date": start_date,
+                "end_date": end_date,
+                "plan": plan,
+                "name": name,
+                "price": price,
+                "description": description,
+            })
+
+    return rates
+
+
+def _parse_heading_date(text: str) -> date:
+    """Parse a date like 'Nov 01, 2025' into a datetime.date."""
+    from datetime import datetime
+
+    return datetime.strptime(text, "%b %d, %Y").date()
 
 
 class EnovaError(Exception):

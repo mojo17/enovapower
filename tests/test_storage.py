@@ -328,3 +328,139 @@ class TestMonthsAgo:
         # March 31 - 1 month should not produce Feb 31
         result = _months_ago(date(2026, 3, 31), 1)
         assert result == date(2026, 2, 28)
+
+
+# ---------------------------------------------------------------------------
+# Tariff storage
+# ---------------------------------------------------------------------------
+
+SAMPLE_RATES = [
+    {
+        "start_date": date(2025, 11, 1),
+        "end_date": date(2026, 4, 30),
+        "plan": "Time-of-Use",
+        "name": "TOU Off-peak",
+        "price": 9.80,
+        "description": "Weekends and holidays all day and Weekdays 7 p.m. - 7 a.m.",
+    },
+    {
+        "start_date": date(2025, 11, 1),
+        "end_date": date(2026, 4, 30),
+        "plan": "Time-of-Use",
+        "name": "TOU Mid-peak",
+        "price": 15.70,
+        "description": "Weekdays 11 a.m. - 5 p.m.",
+    },
+    {
+        "start_date": date(2025, 11, 1),
+        "end_date": date(2026, 4, 30),
+        "plan": "Time-of-Use",
+        "name": "TOU On-peak",
+        "price": 20.30,
+        "description": "Weekdays 7 a.m. - 11 a.m. and 5 p.m. - 7 p.m.",
+    },
+    {
+        "start_date": date(2025, 11, 1),
+        "end_date": date(2026, 10, 31),
+        "plan": "Ultra-Low Overnight",
+        "name": "ULO Off-peak",
+        "price": 9.80,
+        "description": "Weekends and holidays 7 a.m. - 11 p.m.",
+    },
+]
+
+
+class TestTariffTable:
+    def test_tariff_table_created(self):
+        with UsageStore(":memory:") as store:
+            cursor = store._conn.execute(
+                "SELECT name FROM sqlite_master WHERE type='table' AND name='tariff'"
+            )
+            assert cursor.fetchone() is not None
+
+
+class TestSaveTariff:
+    def test_save_returns_count(self):
+        with UsageStore(":memory:") as store:
+            count = store.save_tariff(SAMPLE_RATES)
+            assert count == 4
+
+    def test_save_empty_list(self):
+        with UsageStore(":memory:") as store:
+            count = store.save_tariff([])
+            assert count == 0
+
+    def test_upsert_overwrites(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            updated = [dict(SAMPLE_RATES[0], price=10.50)]
+            store.save_tariff(updated)
+            df = store.load_tariff(plan="Time-of-Use")
+            off_peak = df[df["name"] == "TOU Off-peak"]
+            assert off_peak.iloc[0]["price"] == 10.50
+
+
+class TestLoadTariff:
+    def test_round_trip(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            df = store.load_tariff()
+            assert len(df) == 4
+            expected_cols = [
+                "start_date", "end_date", "plan", "name", "price", "description",
+            ]
+            assert list(df.columns) == expected_cols
+
+    def test_empty_db(self):
+        with UsageStore(":memory:") as store:
+            df = store.load_tariff()
+            assert df.empty
+
+    def test_filter_by_plan(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            df = store.load_tariff(plan="Time-of-Use")
+            assert len(df) == 3
+            assert all(df["plan"] == "Time-of-Use")
+
+    def test_filter_by_plan_no_match(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            df = store.load_tariff(plan="Nonexistent")
+            assert df.empty
+
+    def test_filter_by_as_of(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            # date(2026, 3, 1) is within both TOU (Nov-Apr) and ULO (Nov-Oct)
+            df = store.load_tariff(as_of=date(2026, 3, 1))
+            assert len(df) == 4
+
+    def test_filter_by_as_of_excludes_expired(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            # date(2026, 6, 1) is after TOU end (Apr 30) but within ULO (Oct 31)
+            df = store.load_tariff(as_of=date(2026, 6, 1))
+            assert len(df) == 1
+            assert df.iloc[0]["plan"] == "Ultra-Low Overnight"
+
+    def test_filter_plan_and_as_of(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES)
+            df = store.load_tariff(plan="Time-of-Use", as_of=date(2026, 3, 1))
+            assert len(df) == 3
+
+    def test_dates_are_timestamps(self):
+        with UsageStore(":memory:") as store:
+            store.save_tariff(SAMPLE_RATES[:1])
+            df = store.load_tariff()
+            assert df.iloc[0]["start_date"] == pd.Timestamp("2025-11-01")
+            assert df.iloc[0]["end_date"] == pd.Timestamp("2026-04-30")
+
+    def test_file_based_persistence(self, tmp_path):
+        db_path = tmp_path / "test.db"
+        with UsageStore(db_path) as store:
+            store.save_tariff(SAMPLE_RATES)
+        with UsageStore(db_path) as store:
+            df = store.load_tariff()
+            assert len(df) == 4

@@ -13,6 +13,7 @@ from enova.client import (
     EnovaClient,
     EnovaError,
     parse_csv,
+    parse_tariff_html,
 )
 
 # ---------------------------------------------------------------------------
@@ -495,6 +496,165 @@ class TestDownloadUsageChunked:
             client.download_usage_chunked(date(2026, 3, 1), date(2026, 3, 10))
 
         mock_dl.assert_called_once_with(date(2026, 3, 1), date(2026, 3, 10))
+
+
+# ---------------------------------------------------------------------------
+# Tariff HTML fixture
+# ---------------------------------------------------------------------------
+
+TARIFF_HTML = (
+    "<html><body>"
+    "<h5><strong>Ultra-Low Overnight Pricing:"
+    " Nov 01, 2025 - Oct 31, 2026</strong></h5>"
+    "<table id='pricingTableForULO0'>"
+    "<thead><tr><th>Electricity</th>"
+    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
+    "<tbody>"
+    "<tr><td>ULO Lon-peak</td><td>3.90</td>"
+    "<td>Every day 11 p.m. - 7 a.m.</td></tr>"
+    "<tr><td>ULO Off-peak</td><td>9.80</td>"
+    "<td>Weekends and holidays 7 a.m. - 11 p.m.</td></tr>"
+    "<tr><td>ULO Mid-peak</td><td>15.70</td>"
+    "<td>Weekdays 7 a.m. - 4 p.m. and 9 p.m. to 11 p.m.</td></tr>"
+    "<tr><td>ULO On-peak</td><td>39.10</td>"
+    "<td>Weekdays 4 p.m. - 9 p.m.</td></tr>"
+    "</tbody></table>"
+    "<h5><strong>Time-of-Use Pricing:"
+    " Nov 01, 2025 - Apr 30, 2026</strong></h5>"
+    "<table id='pricingTableForTOU0'>"
+    "<thead><tr><th>Electricity</th>"
+    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
+    "<tbody>"
+    "<tr><td>TOU Off-peak</td><td>9.80</td>"
+    "<td>Weekends and holidays all day and "
+    "Weekdays 7 p.m. - 7 a.m.</td></tr>"
+    "<tr><td>TOU Mid-peak</td><td>15.70</td>"
+    "<td>Weekdays 11 a.m. - 5 p.m.</td></tr>"
+    "<tr><td>TOU On-peak</td><td>20.30</td>"
+    "<td>Weekdays 7 a.m. - 11 a.m. and "
+    "5 p.m. - 7 p.m.</td></tr>"
+    "</tbody></table>"
+    "<h5><strong>Tiered Price Plan Pricing:"
+    " Nov 01, 2025 - Apr 30, 2026</strong></h5>"
+    "<table id='pricingTableForTr0'>"
+    "<thead><tr><th>Electricity</th><th>Price</th>"
+    "<th>Threshold Start</th><th>Threshold End</th></tr></thead>"
+    "<tbody>"
+    "<tr><td>Tier 1</td><td>12.0000</td>"
+    "<td>0.0</td><td>1000.0</td></tr>"
+    "<tr><td>Tier 2</td><td>14.2000</td>"
+    "<td>1000.0</td><td>Infinity</td></tr>"
+    "</tbody></table>"
+    "</body></html>"
+)
+
+
+# ---------------------------------------------------------------------------
+# parse_tariff_html tests
+# ---------------------------------------------------------------------------
+
+class TestParseTariffHtml:
+    def test_parse_all_plans(self):
+        rates = parse_tariff_html(TARIFF_HTML)
+        plans = {r["plan"] for r in rates}
+        assert plans == {"Ultra-Low Overnight", "Time-of-Use", "Tiered"}
+
+    def test_tou_rates(self):
+        rates = [r for r in parse_tariff_html(TARIFF_HTML) if r["plan"] == "Time-of-Use"]
+        assert len(rates) == 3
+        names = [r["name"] for r in rates]
+        assert "TOU Off-peak" in names
+        assert "TOU Mid-peak" in names
+        assert "TOU On-peak" in names
+
+    def test_tou_values(self):
+        rates = parse_tariff_html(TARIFF_HTML)
+        off_peak = next(r for r in rates if r["name"] == "TOU Off-peak")
+        assert off_peak["price"] == 9.80
+        assert "Weekends" in off_peak["description"]
+        assert off_peak["start_date"] == date(2025, 11, 1)
+        assert off_peak["end_date"] == date(2026, 4, 30)
+
+    def test_ulo_rates(self):
+        rates = [r for r in parse_tariff_html(TARIFF_HTML) if r["plan"] == "Ultra-Low Overnight"]
+        assert len(rates) == 4
+        assert rates[0]["start_date"] == date(2025, 11, 1)
+        assert rates[0]["end_date"] == date(2026, 10, 31)
+
+    def test_tier_rates(self):
+        rates = [r for r in parse_tariff_html(TARIFF_HTML) if r["plan"] == "Tiered"]
+        assert len(rates) == 2
+        tier1 = next(r for r in rates if r["name"] == "Tier 1")
+        assert tier1["price"] == 12.0
+        assert tier1["description"] == "0.0 - 1000.0 kWh"
+
+    def test_tier_infinity(self):
+        rates = parse_tariff_html(TARIFF_HTML)
+        tier2 = next(r for r in rates if r["name"] == "Tier 2")
+        assert tier2["description"] == "1000.0 - Infinity kWh"
+
+    def test_total_rate_count(self):
+        rates = parse_tariff_html(TARIFF_HTML)
+        assert len(rates) == 9  # 4 ULO + 3 TOU + 2 Tier
+
+    def test_empty_html(self):
+        rates = parse_tariff_html("<html></html>")
+        assert rates == []
+
+    def test_plan_name_mapping(self):
+        rates = parse_tariff_html(TARIFF_HTML)
+        plan_names = {r["plan"] for r in rates}
+        # "Tiered Price Plan" heading maps to "Tiered"
+        assert "Tiered" in plan_names
+        assert "Tiered Price Plan" not in plan_names
+
+
+# ---------------------------------------------------------------------------
+# EnovaClient.download_tariff tests
+# ---------------------------------------------------------------------------
+
+class TestDownloadTariff:
+    def _make_client(self, meter_id="111111"):
+        client = EnovaClient()
+        client.session = MagicMock()
+        client._meter_id = meter_id
+        return client
+
+    def test_date_range_exceeds_max(self):
+        client = self._make_client()
+        with pytest.raises(EnovaError, match="cannot exceed"):
+            client.download_tariff(date(2026, 1, 1), date(2026, 7, 1))
+
+    def test_from_date_after_to_date(self):
+        client = self._make_client()
+        with pytest.raises(EnovaError, match="from_date must be before"):
+            client.download_tariff(date(2026, 3, 26), date(2026, 2, 25))
+
+    def test_not_logged_in(self):
+        client = self._make_client(meter_id=None)
+        with pytest.raises(EnovaError, match="Not logged in"):
+            client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
+
+    def test_download_success(self):
+        client = self._make_client()
+        client.session.get.return_value = _mock_response(text=TARIFF_HTML)
+
+        rates = client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
+
+        assert len(rates) == 9
+        client.session.get.assert_called_once()
+        call_kwargs = client.session.get.call_args
+        assert call_kwargs[1]["params"]["para"] == "smartMeterPriceCompV3"
+        assert call_kwargs[1]["params"]["fromYear"] == "2026"
+        assert call_kwargs[1]["params"]["fromMonth"] == "02"
+        assert call_kwargs[1]["params"]["fromDay"] == "25"
+
+    def test_download_empty_page(self):
+        client = self._make_client()
+        client.session.get.return_value = _mock_response(text="<html></html>")
+
+        rates = client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
+        assert rates == []
 
 
 # ---------------------------------------------------------------------------

@@ -1,4 +1,4 @@
-"""SQLite storage for Enova Power smart meter usage data."""
+"""SQLite storage for Enova Power smart meter usage and tariff data."""
 
 from __future__ import annotations
 
@@ -30,6 +30,18 @@ CREATE TABLE IF NOT EXISTS usage (
 )
 """
 
+_CREATE_TARIFF_TABLE = """
+CREATE TABLE IF NOT EXISTS tariff (
+    start_date  TEXT NOT NULL,
+    end_date    TEXT NOT NULL,
+    plan        TEXT NOT NULL,
+    name        TEXT NOT NULL,
+    price       REAL NOT NULL,
+    description TEXT,
+    PRIMARY KEY (start_date, end_date, plan, name)
+)
+"""
+
 _INSERT = """
 INSERT OR REPLACE INTO usage (meter_id, date, {cols})
 VALUES (?, ?, {placeholders})
@@ -37,6 +49,11 @@ VALUES (?, ?, {placeholders})
     cols=", ".join(DATA_COLS),
     placeholders=", ".join("?" for _ in DATA_COLS),
 )
+
+_INSERT_TARIFF = """
+INSERT OR REPLACE INTO tariff (start_date, end_date, plan, name, price, description)
+VALUES (?, ?, ?, ?, ?, ?)
+"""
 
 
 class UsageStore:
@@ -55,6 +72,7 @@ class UsageStore:
         self._db_path = str(db_path)
         self._conn = sqlite3.connect(self._db_path)
         self._conn.execute(_CREATE_TABLE)
+        self._conn.execute(_CREATE_TARIFF_TABLE)
         self._conn.commit()
 
     def __enter__(self) -> UsageStore:
@@ -150,6 +168,76 @@ class UsageStore:
         if row and row[0]:
             return date.fromisoformat(row[0])
         return None
+
+    def save_tariff(self, rates: list[dict]) -> int:
+        """Save tariff rates to the database.
+
+        Existing rows for the same (start_date, end_date, plan, name) are replaced.
+
+        Args:
+            rates: List of dicts with keys: start_date, end_date, plan,
+                   name, price, description.
+
+        Returns:
+            Number of rows saved.
+        """
+        if not rates:
+            return 0
+
+        rows = []
+        for r in rates:
+            rows.append((
+                r["start_date"].isoformat(),
+                r["end_date"].isoformat(),
+                r["plan"],
+                r["name"],
+                float(r["price"]),
+                r.get("description", ""),
+            ))
+
+        self._conn.executemany(_INSERT_TARIFF, rows)
+        self._conn.commit()
+        return len(rows)
+
+    def load_tariff(
+        self,
+        plan: str | None = None,
+        as_of: date | None = None,
+    ) -> pd.DataFrame:
+        """Load tariff rates from the database.
+
+        Args:
+            plan: Optional plan name filter (e.g. "Time-of-Use").
+            as_of: Optional date filter — returns only tariffs valid on this date.
+
+        Returns:
+            DataFrame with columns: start_date, end_date, plan, name, price,
+            description. Ordered by start_date, plan, name.
+        """
+        query = "SELECT start_date, end_date, plan, name, price, description FROM tariff WHERE 1=1"
+        params: list = []
+
+        if plan is not None:
+            query += " AND plan = ?"
+            params.append(plan)
+        if as_of is not None:
+            query += " AND start_date <= ? AND end_date >= ?"
+            iso = as_of.isoformat()
+            params.extend([iso, iso])
+
+        query += " ORDER BY start_date, plan, name"
+
+        cursor = self._conn.execute(query, params)
+        rows = cursor.fetchall()
+
+        if not rows:
+            return pd.DataFrame()
+
+        columns = ["start_date", "end_date", "plan", "name", "price", "description"]
+        df = pd.DataFrame(rows, columns=columns)
+        df["start_date"] = pd.to_datetime(df["start_date"])
+        df["end_date"] = pd.to_datetime(df["end_date"])
+        return df
 
     def seed(self, client: EnovaClient, months: int = 12) -> pd.DataFrame:
         """Download historical data and store it.

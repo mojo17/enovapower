@@ -12,6 +12,10 @@
   - [Seeding Historical Data](#seeding-historical-data)
   - [Incremental Updates](#incremental-updates)
   - [Querying Stored Data](#querying-stored-data)
+- [Tariff Rates](#tariff-rates)
+  - [Downloading Tariffs](#downloading-tariffs)
+  - [Storing Tariffs](#storing-tariffs)
+  - [Querying Tariffs](#querying-tariffs)
 - [DataFrame Schema](#dataframe-schema)
 - [Error Handling](#error-handling)
 - [Limitations](#limitations)
@@ -148,6 +152,58 @@ with UsageStore("usage.db") as store:
 
     # Load a specific date range
     df = store.load("111111", from_date=date(2026, 1, 1), to_date=date(2026, 3, 1))
+```
+
+---
+
+## Tariff Rates
+
+The library can download electricity tariff rates from the portal's Price Comparison page. Rates for all plan types (Time-of-Use, Ultra-Low Overnight, Tiered) are collected.
+
+### Downloading Tariffs
+
+`download_tariff()` fetches rates applicable to a given date range (max 90 days):
+
+```python
+from datetime import date
+
+rates = client.download_tariff(
+    from_date=date(2026, 2, 25),
+    to_date=date(2026, 3, 26),
+)
+for r in rates:
+    print(f"{r['plan']} / {r['name']}: {r['price']} cents/kWh")
+```
+
+Each rate dict contains: `start_date`, `end_date`, `plan`, `name`, `price` (cents/kWh), and `description`.
+
+### Storing Tariffs
+
+Tariff rates are stored in a separate `tariff` table in the SQLite database:
+
+```python
+from enova import EnovaClient, UsageStore
+
+client = EnovaClient()
+client.login("1234567890", "your_password")
+
+with UsageStore("usage.db") as store:
+    rates = client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
+    store.save_tariff(rates)
+```
+
+### Querying Tariffs
+
+```python
+with UsageStore("usage.db") as store:
+    # All tariffs
+    df = store.load_tariff()
+
+    # Filter by plan
+    df = store.load_tariff(plan="Time-of-Use")
+
+    # Filter by date (tariffs valid on a specific date)
+    df = store.load_tariff(as_of=date(2026, 3, 1))
 ```
 
 ---
