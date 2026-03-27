@@ -6,9 +6,12 @@
 - [Downloading Usage Data](#downloading-usage-data)
   - [CSV (DataFrame)](#csv-dataframe)
   - [Green Button XML](#green-button-xml)
-  - [Detail Level](#detail-level)
   - [Long Date Ranges](#long-date-ranges)
 - [Parsing Local CSV Files](#parsing-local-csv-files)
+- [Local Storage (SQLite)](#local-storage-sqlite)
+  - [Seeding Historical Data](#seeding-historical-data)
+  - [Incremental Updates](#incremental-updates)
+  - [Querying Stored Data](#querying-stored-data)
 - [DataFrame Schema](#dataframe-schema)
 - [Error Handling](#error-handling)
 - [Limitations](#limitations)
@@ -62,18 +65,6 @@ xml_data = client.download_usage(
 print(xml_data[:200])  # raw XML string
 ```
 
-### Detail Level
-
-Choose between hourly and daily granularity:
-
-```python
-# Hourly breakdown (default) — 24 columns per day
-df_hourly = client.download_usage(date(2026, 3, 1), date(2026, 3, 7), detail="Hourly")
-
-# Daily totals
-df_daily = client.download_usage(date(2026, 3, 1), date(2026, 3, 7), detail="Daily")
-```
-
 ### Long Date Ranges
 
 The portal limits each request to 90 days. For longer ranges, use `download_usage_chunked()` which automatically splits the request into 90-day windows and concatenates the results:
@@ -82,7 +73,6 @@ The portal limits each request to 90 days. For longer ranges, use `download_usag
 df = client.download_usage_chunked(
     from_date=date(2025, 6, 1),
     to_date=date(2026, 3, 26),
-    detail="Hourly",
 )
 print(f"{len(df)} days of data")
 ```
@@ -102,6 +92,62 @@ from enova.client import parse_csv
 csv_text = Path("SmartMeter1234567890_2026-03-2712.47.47.csv").read_text()
 df = parse_csv(csv_text)
 print(df.head())
+```
+
+---
+
+## Local Storage (SQLite)
+
+`UsageStore` is an optional SQLite-backed layer that accumulates usage data locally. It composes with `EnovaClient` — the client works standalone without it.
+
+```python
+from enova import EnovaClient, UsageStore
+
+client = EnovaClient()
+client.login("1234567890", "your_password")
+
+with UsageStore("usage.db") as store:
+    store.seed(client)        # backfill last 12 months
+    store.update(client)      # incremental update (only new days)
+```
+
+The database file (`*.db`) is excluded from version control via `.gitignore`.
+
+### Seeding Historical Data
+
+`seed()` downloads the last N months of data and stores it:
+
+```python
+with UsageStore("usage.db") as store:
+    df = store.seed(client)              # default: last 12 months
+    df = store.seed(client, months=6)    # last 6 months
+```
+
+### Incremental Updates
+
+`update()` finds the latest stored date and downloads only new data since then. If no prior data exists, it falls back to `seed()`.
+
+```python
+with UsageStore("usage.db") as store:
+    new_data = store.update(client)
+    print(f"Downloaded {len(new_data)} new days")
+```
+
+### Querying Stored Data
+
+```python
+from datetime import date
+
+with UsageStore("usage.db") as store:
+    # Check the latest record
+    latest = store.latest_record_date("111111")
+    print(f"Data up to: {latest}")
+
+    # Load all data for a meter
+    df = store.load("111111")
+
+    # Load a specific date range
+    df = store.load("111111", from_date=date(2026, 1, 1), to_date=date(2026, 3, 1))
 ```
 
 ---

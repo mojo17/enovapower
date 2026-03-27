@@ -389,9 +389,7 @@ class TestDownloadUsage:
             _mock_response(text=MINIMAL_CSV),
         ]
 
-        client.download_usage(
-            date(2026, 2, 25), date(2026, 3, 26), detail="Daily"
-        )
+        client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
 
         first_call = client.session.post.call_args_list[0]
         data = first_call[1]["data"]
@@ -404,7 +402,7 @@ class TestDownloadUsage:
         assert data["GB_month_to"] == "03"
         assert data["GB_day_to"] == "26"
         assert data["GB_year_to"] == "2026"
-        assert data["hourlyOrDaily"] == "Daily"
+        assert data["hourlyOrDaily"] == "Hourly"
         assert data["downloadConsumption"] == "Y"
         assert data["selectedMeterId"] == "111111"
         assert data["inquiryType"] == "electric"
@@ -435,7 +433,7 @@ class TestDownloadUsageChunked:
             df = client.download_usage_chunked(date(2026, 3, 1), date(2026, 3, 10))
 
         mock_dl.assert_called_once_with(
-            date(2026, 3, 1), date(2026, 3, 10), detail="Hourly", fmt="csv"
+            date(2026, 3, 1), date(2026, 3, 10),
         )
         assert len(df) == 1
 
@@ -489,16 +487,14 @@ class TestDownloadUsageChunked:
 
         assert len(df) == 1  # Deduplicated
 
-    def test_passes_detail_param(self):
+    def test_calls_download_usage_with_correct_args(self):
         client = EnovaClient()
         client._meter_id = "111111"
         with patch.object(client, "download_usage") as mock_dl:
             mock_dl.return_value = parse_csv(MINIMAL_CSV)
-            client.download_usage_chunked(
-                date(2026, 3, 1), date(2026, 3, 10), detail="Daily"
-            )
+            client.download_usage_chunked(date(2026, 3, 1), date(2026, 3, 10))
 
-        assert mock_dl.call_args[1]["detail"] == "Daily"
+        mock_dl.assert_called_once_with(date(2026, 3, 1), date(2026, 3, 10))
 
 
 # ---------------------------------------------------------------------------

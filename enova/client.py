@@ -5,7 +5,6 @@ from __future__ import annotations
 import csv
 import io
 from datetime import date, timedelta
-from typing import Literal
 
 import pandas as pd
 import requests
@@ -22,7 +21,7 @@ class EnovaClient:
 
         client = EnovaClient()
         client.login("your_account_number", "your_password")
-        df = client.download_usage(date(2026, 2, 25), date(2026, 3, 26), detail="Hourly")
+        df = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     """
 
     def __init__(self) -> None:
@@ -108,15 +107,13 @@ class EnovaClient:
         self,
         from_date: date,
         to_date: date,
-        detail: Literal["Hourly", "Daily"] = "Hourly",
-        fmt: Literal["csv", "xml"] = "csv",
+        fmt: str = "csv",
     ) -> pd.DataFrame | str:
         """Download smart meter usage data for a date range.
 
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
-            detail: "Hourly" for hourly breakdown or "Daily" for daily totals.
             fmt: "csv" returns a parsed DataFrame; "xml" returns raw XML string.
 
         Returns:
@@ -153,7 +150,7 @@ class EnovaClient:
             "tab": "GBDMD",
             "inquiryType": "electric",
             "selectedMeterId": self._meter_id,
-            "hourlyOrDaily": detail,
+            "hourlyOrDaily": "Hourly",
         }
 
         resp = self.session.post(f"{BASE_URL}/app/capricorn", data=form_data)
@@ -194,14 +191,12 @@ class EnovaClient:
         self,
         from_date: date,
         to_date: date,
-        detail: Literal["Hourly", "Daily"] = "Hourly",
     ) -> pd.DataFrame:
         """Download usage data for ranges exceeding 90 days by chunking requests.
 
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
-            detail: "Hourly" or "Daily".
 
         Returns:
             pd.DataFrame with all data concatenated.
@@ -210,7 +205,7 @@ class EnovaClient:
         current = from_date
         while current <= to_date:
             chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            df = self.download_usage(current, chunk_end, detail=detail, fmt="csv")
+            df = self.download_usage(current, chunk_end)
             if isinstance(df, pd.DataFrame) and not df.empty:
                 chunks.append(df)
             current = chunk_end + timedelta(days=1)
