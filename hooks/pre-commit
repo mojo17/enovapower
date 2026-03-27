@@ -1,0 +1,10 @@
+#!/usr/bin/env bash
+set -e
+
+echo "Running linter..."
+uv tool run ruff check .
+
+echo "Running tests..."
+.venv/bin/python -m pytest tests/ -q
+
+echo "All checks passed."
