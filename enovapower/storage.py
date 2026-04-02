@@ -6,7 +6,6 @@ import sqlite3
 from datetime import date, timedelta
 from pathlib import Path
 
-from enovapower.client import EnovaClient
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 
 TOU_COLS = ["total_on_peak", "total_mid_peak", "total_off_peak"]
@@ -250,7 +249,7 @@ class UsageStore:
             for row in rows
         ]
 
-    def seed(self, client: EnovaClient, months: int = 12) -> list[UsageReading]:
+    def seed(self, client, months: int = 12) -> list[UsageReading]:
         """Download historical data and store it.
 
         Downloads the last ``months`` months of data using the client
@@ -274,7 +273,7 @@ class UsageStore:
             self.save(client.meter_id, readings)
         return readings
 
-    def update(self, client: EnovaClient) -> list[UsageReading]:
+    def update(self, client) -> list[UsageReading]:
         """Download new data since the last stored record and save it.
 
         If no prior data exists, falls back to ``seed()``.
@@ -299,6 +298,48 @@ class UsageStore:
             return []
 
         readings = client.download_usage_chunked(from_date, to_date)
+        if readings:
+            self.save(client.meter_id, readings)
+        return readings
+
+    async def async_seed(self, client, months: int = 12) -> list[UsageReading]:
+        """Async version of :meth:`seed`.
+
+        Args:
+            client: An authenticated AsyncEnovaClient.
+            months: Number of months of history to download (default 12).
+
+        Returns:
+            The downloaded readings.
+        """
+        to_date = date.today()
+        from_date = _months_ago(to_date, months)
+
+        readings = await client.download_usage_chunked(from_date, to_date)
+        if readings:
+            self.save(client.meter_id, readings)
+        return readings
+
+    async def async_update(self, client) -> list[UsageReading]:
+        """Async version of :meth:`update`.
+
+        Args:
+            client: An authenticated AsyncEnovaClient.
+
+        Returns:
+            List of newly downloaded readings (may be empty).
+        """
+        latest = self.latest_record_date(client.meter_id)
+        if latest is None:
+            return await self.async_seed(client)
+
+        from_date = latest + timedelta(days=1)
+        to_date = date.today()
+
+        if from_date > to_date:
+            return []
+
+        readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
         return readings

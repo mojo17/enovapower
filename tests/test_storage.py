@@ -1,7 +1,7 @@
 """Tests for the Enova Power SQLite storage layer."""
 
 from datetime import date
-from unittest.mock import MagicMock, PropertyMock, patch
+from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
@@ -39,6 +39,14 @@ def _make_readings(csv_text=MINIMAL_CSV):
 
 def _mock_client(meter_id=METER_ID, readings=None):
     client = MagicMock()
+    type(client).meter_id = PropertyMock(return_value=meter_id)
+    if readings is not None:
+        client.download_usage_chunked.return_value = readings
+    return client
+
+
+def _mock_async_client(meter_id=METER_ID, readings=None):
+    client = AsyncMock()
     type(client).meter_id = PropertyMock(return_value=meter_id)
     if readings is not None:
         client.download_usage_chunked.return_value = readings
@@ -470,3 +478,109 @@ class TestLoadTariff:
         with UsageStore(db_path) as store:
             rates = store.load_tariff()
             assert len(rates) == 4
+
+
+# ---------------------------------------------------------------------------
+# async_seed
+# ---------------------------------------------------------------------------
+
+class TestAsyncSeed:
+    @patch("enovapower.storage.date")
+    async def test_async_seed_downloads_and_stores(self, mock_date):
+        mock_date.today.return_value = date(2026, 3, 27)
+        mock_date.side_effect = lambda *args: date(*args)
+
+        client = _mock_async_client(readings=_make_readings())
+        with UsageStore(":memory:") as store:
+            readings = await store.async_seed(client)
+
+        assert len(readings) == 1
+        client.download_usage_chunked.assert_awaited_once()
+        args = client.download_usage_chunked.call_args[0]
+        assert args[0] == date(2025, 3, 27)  # 12 months ago
+        assert args[1] == date(2026, 3, 27)
+
+    @patch("enovapower.storage.date")
+    async def test_async_seed_custom_months(self, mock_date):
+        mock_date.today.return_value = date(2026, 3, 27)
+        mock_date.side_effect = lambda *args: date(*args)
+
+        client = _mock_async_client(readings=_make_readings())
+        with UsageStore(":memory:") as store:
+            await store.async_seed(client, months=6)
+
+        args = client.download_usage_chunked.call_args[0]
+        assert args[0] == date(2025, 9, 27)  # 6 months ago
+
+    async def test_async_seed_stores_data(self):
+        client = _mock_async_client(readings=_make_readings())
+        with UsageStore(":memory:") as store:
+            await store.async_seed(client)
+            loaded = store.load(METER_ID)
+            assert len(loaded) == 1
+
+    async def test_async_seed_empty_result(self):
+        client = _mock_async_client(readings=[])
+        with UsageStore(":memory:") as store:
+            readings = await store.async_seed(client)
+            assert readings == []
+            assert store.load(METER_ID) == []
+
+
+# ---------------------------------------------------------------------------
+# async_update
+# ---------------------------------------------------------------------------
+
+class TestAsyncUpdate:
+    async def test_async_update_no_prior_data_falls_back_to_seed(self):
+        client = _mock_async_client(readings=_make_readings())
+        with UsageStore(":memory:") as store:
+            with patch.object(
+                store, "async_seed", new_callable=AsyncMock, return_value=_make_readings()
+            ) as mock_seed:
+                await store.async_update(client)
+                mock_seed.assert_awaited_once_with(client)
+
+    @patch("enovapower.storage.date")
+    async def test_async_update_incremental(self, mock_date):
+        mock_date.today.return_value = date(2026, 3, 27)
+        mock_date.side_effect = lambda *args: date(*args)
+        mock_date.fromisoformat = date.fromisoformat
+
+        new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-27")
+        client = _mock_async_client(readings=_make_readings(new_row_csv))
+
+        with UsageStore(":memory:") as store:
+            store.save(METER_ID, _make_readings(TWO_ROW_CSV))
+            assert store.latest_record_date(METER_ID) == date(2026, 3, 2)
+
+            readings = await store.async_update(client)
+
+        assert len(readings) == 1
+        args = client.download_usage_chunked.call_args[0]
+        assert args[0] == date(2026, 3, 3)   # day after latest
+        assert args[1] == date(2026, 3, 27)   # today
+
+    @patch("enovapower.storage.date")
+    async def test_async_update_already_current(self, mock_date):
+        mock_date.today.return_value = date(2026, 3, 1)
+        mock_date.side_effect = lambda *args: date(*args)
+        mock_date.fromisoformat = date.fromisoformat
+
+        client = _mock_async_client()
+        with UsageStore(":memory:") as store:
+            store.save(METER_ID, _make_readings())  # has 2026-03-01
+            readings = await store.async_update(client)
+
+        assert readings == []
+        client.download_usage_chunked.assert_not_awaited()
+
+    async def test_async_update_stores_new_data(self):
+        new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-10")
+        client = _mock_async_client(readings=_make_readings(new_row_csv))
+
+        with UsageStore(":memory:") as store:
+            store.save(METER_ID, _make_readings())
+            await store.async_update(client)
+            loaded = store.load(METER_ID)
+            assert len(loaded) == 2

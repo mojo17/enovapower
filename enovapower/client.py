@@ -1,13 +1,18 @@
-"""Client for downloading electricity usage and tariff data from Enova Power's My Account portal."""
+"""Parsers, constants, exceptions, and sync facade for Enova Power.
+
+The heavy lifting lives in ``async_client.AsyncEnovaClient``.  This module
+provides the shared parsing helpers, constants, and a thin synchronous
+``EnovaClient`` that delegates every call through ``asyncio.run()``.
+"""
 
 from __future__ import annotations
 
+import asyncio
 import csv
 import io
 import re
-from datetime import date, timedelta
+from datetime import date
 
-import requests
 from bs4 import BeautifulSoup
 
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
@@ -16,273 +21,25 @@ BASE_URL = "https://myaccount.enovapower.com"
 MAX_RANGE_DAYS = 90
 
 
-class EnovaClient:
-    """Authenticated client for Enova Power smart meter data downloads.
+# ---------------------------------------------------------------------------
+# Exceptions
+# ---------------------------------------------------------------------------
 
-    Usage::
+class EnovaError(Exception):
+    """Base exception for Enova client errors."""
 
-        client = EnovaClient()
-        client.login("your_account_number", "your_password")
-        readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
-    """
 
-    def __init__(self) -> None:
-        self.session = requests.Session()
-        self.session.headers.update({
-            "User-Agent": "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
-                          "AppleWebKit/537.36 (KHTML, like Gecko) "
-                          "Chrome/120.0.0.0 Safari/537.36",
-        })
-        self._meter_id: str | None = None
-        self._account_number: str | None = None
+class EnovaAuthError(EnovaError):
+    """Authentication failure."""
 
-    def login(self, access_code: str, password: str) -> None:
-        """Log in to the Enova Power portal.
 
-        Args:
-            access_code: Account number (e.g. "1234567890").
-            password: Account password.
+class EnovaConnectionError(EnovaError):
+    """Network or connection failure."""
 
-        Raises:
-            EnovaAuthError: If login fails.
-        """
-        # Get login page to obtain CSRF token
-        resp = self.session.get(f"{BASE_URL}/app/login.jsp")
-        resp.raise_for_status()
-        soup = BeautifulSoup(resp.text, "html.parser")
-        csrf_token = soup.find("input", {"name": "jspCSRFToken"})
-        if not csrf_token:
-            raise EnovaAuthError("Could not find CSRF token on login page")
 
-        # Submit login form
-        login_data = {
-            "para": "index",
-            "accessCode": access_code,
-            "password": password,
-            "jspCSRFToken": csrf_token["value"],
-            "nextPara": "",
-        }
-        resp = self.session.post(
-            f"{BASE_URL}/app/capricorn",
-            data=login_data,
-            params={"para": "index"},
-        )
-        resp.raise_for_status()
-
-        if "sessionExpired" in resp.url or "login.jsp" in resp.url:
-            raise EnovaAuthError("Login failed — check access code and password")
-
-        # Extract meter ID and account number from the dashboard page
-        soup = BeautifulSoup(resp.text, "html.parser")
-        self._extract_account_info(soup)
-        self._account_number = access_code
-
-    def _extract_account_info(self, soup: BeautifulSoup) -> None:
-        """Extract meter ID from the dashboard page."""
-        # Meter ID is in a refresh link like ?...inMeterID=111111
-        refresh_link = soup.find("a", id="refresh_btn")
-        if refresh_link and "inMeterID=" in refresh_link.get("href", ""):
-            href = refresh_link["href"]
-            self._meter_id = href.split("inMeterID=")[-1]
-
-        # Also try the Smart Meter iframe page
-        if not self._meter_id:
-            resp = self.session.get(
-                f"{BASE_URL}/app/capricorn",
-                params={
-                    "para": "smartMeterConsumV3",
-                    "inquiryType": "Electric",
-                    "tab": "SMCONSUMV3",
-                },
-            )
-            if resp.ok:
-                iframe_soup = BeautifulSoup(resp.text, "html.parser")
-                meter_input = iframe_soup.find("input", {"name": "selectedMeterId"})
-                if meter_input:
-                    self._meter_id = meter_input["value"]
-
-    @property
-    def meter_id(self) -> str | None:
-        return self._meter_id
-
-    @property
-    def account_number(self) -> str | None:
-        return self._account_number
-
-    def download_usage(
-        self,
-        from_date: date,
-        to_date: date,
-        fmt: str = "csv",
-    ) -> list[UsageReading] | str:
-        """Download smart meter usage data for a date range.
-
-        Args:
-            from_date: Start date (inclusive).
-            to_date: End date (inclusive).
-            fmt: "csv" returns a list of UsageReading; "xml" returns raw XML string.
-
-        Returns:
-            list[UsageReading] for CSV format, raw XML string for XML format.
-
-        Raises:
-            EnovaError: On download failure or invalid parameters.
-        """
-        if (to_date - from_date).days > MAX_RANGE_DAYS:
-            raise EnovaError(
-                f"Date range cannot exceed {MAX_RANGE_DAYS} days. "
-                f"Use download_usage_chunked() for longer ranges."
-            )
-        if to_date < from_date:
-            raise EnovaError("from_date must be before to_date")
-        if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
-
-        # Step 1: POST the download form to /app/capricorn
-        form_data = {
-            "para": "greenButtonDownloadV3",
-            "GB_iso_fromDate": from_date.isoformat(),
-            "GB_iso_toDate": to_date.isoformat(),
-            "GB_fromDate": from_date.strftime("%m/%d/%Y"),
-            "GB_toDate": to_date.strftime("%m/%d/%Y"),
-            "GB_month_from": f"{from_date.month:02d}",
-            "GB_day_from": f"{from_date.day:02d}",
-            "GB_year_from": str(from_date.year),
-            "GB_month_to": f"{to_date.month:02d}",
-            "GB_day_to": f"{to_date.day:02d}",
-            "GB_year_to": str(to_date.year),
-            "downloadConsumption": "Y" if fmt == "csv" else "",
-            "userAction": "",
-            "tab": "GBDMD",
-            "inquiryType": "electric",
-            "selectedMeterId": self._meter_id,
-            "hourlyOrDaily": "Hourly",
-        }
-
-        resp = self.session.post(f"{BASE_URL}/app/capricorn", data=form_data)
-        resp.raise_for_status()
-
-        if fmt == "xml":
-            # The response page contains a form that auto-submits to FileDownloader
-            soup = BeautifulSoup(resp.text, "html.parser")
-            xml_form = soup.find("form", {"name": "downloadXml"})
-            if xml_form:
-                xml_url = xml_form.get("action", "")
-                if not xml_url.startswith("http"):
-                    xml_url = BASE_URL + xml_url
-                xml_resp = self.session.post(xml_url)
-                xml_resp.raise_for_status()
-                return xml_resp.text
-            raise EnovaError("Could not find XML download form in response")
-
-        # CSV: the response page has a form that auto-submits to ExcelExport
-        soup = BeautifulSoup(resp.text, "html.parser")
-        excel_form = soup.find("form", {"name": "downloadData2Spreadsheet"})
-        if not excel_form:
-            raise EnovaError(
-                "Could not find spreadsheet download form in response. "
-                "Session may have expired."
-            )
-
-        export_url = excel_form.get("action", "")
-        if not export_url.startswith("http"):
-            export_url = BASE_URL + export_url
-
-        csv_resp = self.session.post(export_url)
-        csv_resp.raise_for_status()
-
-        return parse_csv(csv_resp.text)
-
-    def download_usage_chunked(
-        self,
-        from_date: date,
-        to_date: date,
-    ) -> list[UsageReading]:
-        """Download usage data for ranges exceeding 90 days by chunking requests.
-
-        Args:
-            from_date: Start date (inclusive).
-            to_date: End date (inclusive).
-
-        Returns:
-            list[UsageReading] with all data concatenated and deduplicated.
-        """
-        all_readings: list[UsageReading] = []
-        seen_dates: set[date] = set()
-        current = from_date
-        while current <= to_date:
-            chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            result = self.download_usage(current, chunk_end)
-            if isinstance(result, list):
-                for reading in result:
-                    if reading.date not in seen_dates:
-                        all_readings.append(reading)
-                        seen_dates.add(reading.date)
-            current = chunk_end + timedelta(days=1)
-
-        return all_readings
-
-    def download_tariff(
-        self,
-        from_date: date,
-        to_date: date,
-    ) -> list[TariffRate]:
-        """Download tariff rates from the Price Comparison page.
-
-        Args:
-            from_date: Start date of the usage period to query (inclusive).
-            to_date: End date of the usage period to query (inclusive).
-
-        Returns:
-            List of TariffRate objects.
-
-        Raises:
-            EnovaError: On download failure or invalid parameters.
-        """
-        if (to_date - from_date).days > MAX_RANGE_DAYS:
-            raise EnovaError(
-                f"Date range cannot exceed {MAX_RANGE_DAYS} days."
-            )
-        if to_date < from_date:
-            raise EnovaError("from_date must be before to_date")
-        if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
-
-        resp = self.session.get(
-            f"{BASE_URL}/app/capricorn",
-            params={
-                "para": "smartMeterPriceCompV3",
-                "inquiryType": "hydro",
-                "fromYear": str(from_date.year),
-                "fromMonth": f"{from_date.month:02d}",
-                "fromDay": f"{from_date.day:02d}",
-                "toYear": str(to_date.year),
-                "toMonth": f"{to_date.month:02d}",
-                "toDay": f"{to_date.day:02d}",
-            },
-        )
-        resp.raise_for_status()
-        return parse_tariff_html(resp.text)
-
-    def get_latest_usage(self) -> UsageReading | None:
-        """Download the most recent usage reading.
-
-        Fetches the last 3 days of data (to account for portal lag)
-        and returns the most recent reading.
-
-        Returns:
-            The latest UsageReading, or None if no data available.
-
-        Raises:
-            EnovaError: If not logged in.
-        """
-        to_date = date.today()
-        from_date = to_date - timedelta(days=3)
-        readings = self.download_usage(from_date, to_date)
-        if isinstance(readings, list) and readings:
-            return readings[-1]
-        return None
-
+# ---------------------------------------------------------------------------
+# CSV / HTML parsers (pure functions, shared by sync & async paths)
+# ---------------------------------------------------------------------------
 
 def parse_csv(raw_csv: str) -> list[UsageReading]:
     """Parse the Enova CSV export into a list of UsageReading objects.
@@ -410,13 +167,60 @@ def _parse_heading_date(text: str) -> date:
     return datetime.strptime(text, "%b %d, %Y").date()
 
 
-class EnovaError(Exception):
-    """Base exception for Enova client errors."""
+# ---------------------------------------------------------------------------
+# Synchronous facade
+# ---------------------------------------------------------------------------
 
+class EnovaClient:
+    """Synchronous wrapper around :class:`AsyncEnovaClient`.
 
-class EnovaAuthError(EnovaError):
-    """Authentication failure."""
+    Every method delegates to the async implementation via ``asyncio.run()``.
+    Use this for scripts, notebooks, and other non-async contexts.
 
+    Usage::
 
-class EnovaConnectionError(EnovaError):
-    """Network or connection failure."""
+        client = EnovaClient()
+        client.login("your_account_number", "your_password")
+        readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
+    """
+
+    def __init__(self) -> None:
+        from enovapower.async_client import AsyncEnovaClient
+
+        self._async = AsyncEnovaClient()
+
+    @property
+    def meter_id(self) -> str | None:
+        return self._async.meter_id
+
+    @property
+    def account_number(self) -> str | None:
+        return self._async.account_number
+
+    def login(self, access_code: str, password: str) -> None:
+        asyncio.run(self._async.login(access_code, password))
+
+    def download_usage(
+        self,
+        from_date: date,
+        to_date: date,
+        fmt: str = "csv",
+    ) -> list[UsageReading] | str:
+        return asyncio.run(self._async.download_usage(from_date, to_date, fmt))
+
+    def download_usage_chunked(
+        self,
+        from_date: date,
+        to_date: date,
+    ) -> list[UsageReading]:
+        return asyncio.run(self._async.download_usage_chunked(from_date, to_date))
+
+    def download_tariff(
+        self,
+        from_date: date,
+        to_date: date,
+    ) -> list[TariffRate]:
+        return asyncio.run(self._async.download_tariff(from_date, to_date))
+
+    def get_latest_usage(self) -> UsageReading | None:
+        return asyncio.run(self._async.get_latest_usage())

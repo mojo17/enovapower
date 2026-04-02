@@ -1,4 +1,8 @@
-"""Async client for downloading electricity usage and tariff data from Enova Power."""
+"""Async client for downloading electricity usage and tariff data from Enova Power.
+
+This is the primary implementation. The synchronous ``EnovaClient`` in
+``client.py`` is a thin facade that delegates to this class via ``asyncio.run()``.
+"""
 
 from __future__ import annotations
 
@@ -28,14 +32,15 @@ _USER_AGENT = (
 class AsyncEnovaClient:
     """Async client for Enova Power smart meter data downloads.
 
-    Designed for Home Assistant integration. Accepts an optional
-    ``aiohttp.ClientSession`` so the caller can manage the session lifecycle.
+    Designed for Home Assistant integration and other async applications.
+    Accepts an optional ``aiohttp.ClientSession`` so the caller can manage
+    the session lifecycle.
 
     Usage::
 
         async with AsyncEnovaClient() as client:
-            await client.async_login("your_account_number", "your_password")
-            readings = await client.async_download_usage(date(2026, 2, 25), date(2026, 3, 26))
+            await client.login("your_account_number", "your_password")
+            readings = await client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     """
 
     def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
@@ -55,9 +60,9 @@ class AsyncEnovaClient:
         return self
 
     async def __aexit__(self, *exc: object) -> None:
-        await self.async_close()
+        await self.close()
 
-    async def async_close(self) -> None:
+    async def close(self) -> None:
         """Close the session if it was created internally."""
         if not self._external_session and self._session:
             await self._session.close()
@@ -71,7 +76,7 @@ class AsyncEnovaClient:
     def account_number(self) -> str | None:
         return self._account_number
 
-    async def async_login(self, access_code: str, password: str) -> None:
+    async def login(self, access_code: str, password: str) -> None:
         """Log in to the Enova Power portal.
 
         Args:
@@ -152,7 +157,7 @@ class AsyncEnovaClient:
             except aiohttp.ClientError:
                 pass
 
-    async def async_download_usage(
+    async def download_usage(
         self,
         from_date: date,
         to_date: date,
@@ -175,12 +180,12 @@ class AsyncEnovaClient:
         if (to_date - from_date).days > MAX_RANGE_DAYS:
             raise EnovaError(
                 f"Date range cannot exceed {MAX_RANGE_DAYS} days. "
-                f"Use async_download_usage_chunked() for longer ranges."
+                f"Use download_usage_chunked() for longer ranges."
             )
         if to_date < from_date:
             raise EnovaError("from_date must be before to_date")
         if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call async_login() first.")
+            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
 
         session = await self._ensure_session()
 
@@ -249,7 +254,7 @@ class AsyncEnovaClient:
 
         return parse_csv(csv_text)
 
-    async def async_download_usage_chunked(
+    async def download_usage_chunked(
         self,
         from_date: date,
         to_date: date,
@@ -268,7 +273,7 @@ class AsyncEnovaClient:
         current = from_date
         while current <= to_date:
             chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            result = await self.async_download_usage(current, chunk_end)
+            result = await self.download_usage(current, chunk_end)
             if isinstance(result, list):
                 for reading in result:
                     if reading.date not in seen_dates:
@@ -278,7 +283,7 @@ class AsyncEnovaClient:
 
         return all_readings
 
-    async def async_download_tariff(
+    async def download_tariff(
         self,
         from_date: date,
         to_date: date,
@@ -301,7 +306,7 @@ class AsyncEnovaClient:
         if to_date < from_date:
             raise EnovaError("from_date must be before to_date")
         if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call async_login() first.")
+            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
 
         session = await self._ensure_session()
 
@@ -326,7 +331,7 @@ class AsyncEnovaClient:
 
         return parse_tariff_html(text)
 
-    async def async_get_latest_usage(self) -> UsageReading | None:
+    async def get_latest_usage(self) -> UsageReading | None:
         """Download the most recent usage reading.
 
         Fetches the last 3 days of data (to account for portal lag)
@@ -341,7 +346,7 @@ class AsyncEnovaClient:
         """
         to_date = date.today()
         from_date = to_date - timedelta(days=3)
-        readings = await self.async_download_usage(from_date, to_date)
+        readings = await self.download_usage(from_date, to_date)
         if isinstance(readings, list) and readings:
             return readings[-1]
         return None

@@ -4,7 +4,6 @@ version = "0.2.0"
 description = "Python client for downloading electricity usage data from Enova Power"
 requires-python = ">=3.10"
 dependencies = [
-    "requests>=2.28",
     "beautifulsoup4>=4.12",
     "aiohttp>=3.9",
 ]

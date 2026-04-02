@@ -1,4 +1,4 @@
-# enova
+# enovapower
 
 A Python library for downloading electricity usage data from the [Enova Power](https://enovapower.com) customer portal.
 
@@ -9,27 +9,54 @@ Enova Power serves residential and commercial customers in the Kitchener-Waterlo
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
+pip install -e .
 ```
 
 ```python
 from datetime import date
-from enova import EnovaClient
+from enovapower import EnovaClient
 
 client = EnovaClient()
 client.login("your_account_number", "your_password")
 
-df = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
-print(df)
+readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
+for r in readings:
+    print(f"{r.date}: {r.total:.2f} kWh")
 ```
 
 ## Features
 
 - Authenticate with the Enova Power My Account portal
-- Download hourly or daily smart meter usage data as a pandas DataFrame
+- Download hourly smart meter usage data as `UsageReading` dataclasses
 - Download Green Button XML exports
+- Download tariff rates for all pricing plans (Time-of-Use, Ultra-Low Overnight, Tiered)
 - Automatically chunk requests for date ranges exceeding 90 days
-- Parse raw CSV exports into clean, typed DataFrames
+- Store and incrementally update usage history in a local SQLite database
+- Full async client (`AsyncEnovaClient`) for integration with async frameworks
+
+## Async usage
+
+```python
+from enovapower import AsyncEnovaClient
+
+async with AsyncEnovaClient() as client:
+    await client.async_login("your_account_number", "your_password")
+    readings = await client.async_download_usage(from_date, to_date)
+```
+
+## Local storage
+
+```python
+from enovapower import EnovaClient, UsageStore
+
+client = EnovaClient()
+client.login("your_account_number", "your_password")
+
+with UsageStore("usage.db") as store:
+    store.seed(client, months=12)   # initial backfill
+    store.update(client)            # incremental update
+    readings = store.load("your_meter_id", from_date, to_date)
+```
 
 ## Documentation
 
