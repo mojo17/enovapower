@@ -6,15 +6,10 @@ from unittest.mock import AsyncMock, patch
 
 import pytest
 
-from enovapower.client import (
-    EnovaAuthError,
-    EnovaClient,
-    EnovaConnectionError,
-    EnovaError,
-    parse_csv,
-    parse_tariff_html,
-)
+from enovapower.client import EnovaClient
+from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
 from enovapower.models import TariffRate, UsageReading
+from enovapower.parsers import parse_csv, parse_tariff_html
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -260,8 +255,18 @@ class TestSyncFacade:
             client._async, "download_usage", new_callable=AsyncMock, return_value=readings
         ) as mock_dl:
             result = client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
-            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1), "csv")
+            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
             assert result == readings
+
+    def test_download_usage_xml_delegates_to_async(self):
+        client = EnovaClient()
+        with patch.object(
+            client._async, "download_usage_xml",
+            new_callable=AsyncMock, return_value="<xml/>",
+        ) as mock_dl:
+            result = client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
+            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
+            assert result == "<xml/>"
 
     def test_download_usage_chunked_delegates_to_async(self):
         client = EnovaClient()

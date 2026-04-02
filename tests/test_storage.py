@@ -5,8 +5,8 @@ from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
-from enovapower.client import parse_csv
 from enovapower.models import TariffRate, UsageReading
+from enovapower.parsers import parse_csv
 from enovapower.storage import UsageStore, _months_ago
 
 MINIMAL_CSV = (

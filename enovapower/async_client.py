@@ -6,22 +6,21 @@ This is the primary implementation. The synchronous ``EnovaClient`` in
 
 from __future__ import annotations
 
+import os
 from datetime import date, timedelta
 
 import aiohttp
 from bs4 import BeautifulSoup
 
-from enovapower.client import (
-    BASE_URL,
-    MAX_RANGE_DAYS,
-    EnovaAuthError,
-    EnovaConnectionError,
-    EnovaError,
-    parse_csv,
-    parse_tariff_html,
-)
+from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
 from enovapower.models import TariffRate, UsageReading
+from enovapower.parsers import parse_csv, parse_tariff_html
 
+BASE_URL = "https://myaccount.enovapower.com"
+MAX_RANGE_DAYS = 90
+
+# The portal blocks requests with non-browser User-Agent headers, so we
+# present as a standard browser to avoid 403 or empty responses.
 _USER_AGENT = (
     "Mozilla/5.0 (Macintosh; Intel Mac OS X 10_15_7) "
     "AppleWebKit/537.36 (KHTML, like Gecko) "
@@ -76,17 +75,33 @@ class AsyncEnovaClient:
     def account_number(self) -> str | None:
         return self._account_number
 
-    async def login(self, access_code: str, password: str) -> None:
+    async def login(
+        self,
+        access_code: str | None = None,
+        password: str | None = None,
+    ) -> None:
         """Log in to the Enova Power portal.
+
+        Credentials are resolved in order:
+        1. Explicit arguments
+        2. ``ENOVA_USERNAME`` / ``ENOVA_PASSWORD`` environment variables
 
         Args:
             access_code: Account number (e.g. "1234567890").
             password: Account password.
 
         Raises:
-            EnovaAuthError: If login fails.
+            EnovaAuthError: If login fails or credentials are missing.
             EnovaConnectionError: On network failure.
         """
+        access_code = access_code or os.environ.get("ENOVA_USERNAME")
+        password = password or os.environ.get("ENOVA_PASSWORD")
+
+        if not access_code or not password:
+            raise EnovaAuthError(
+                "Credentials required. Pass access_code/password or set "
+                "ENOVA_USERNAME and ENOVA_PASSWORD environment variables."
+            )
         session = await self._ensure_session()
 
         try:
@@ -157,39 +172,11 @@ class AsyncEnovaClient:
             except aiohttp.ClientError:
                 pass
 
-    async def download_usage(
-        self,
-        from_date: date,
-        to_date: date,
-        fmt: str = "csv",
-    ) -> list[UsageReading] | str:
-        """Download smart meter usage data for a date range.
-
-        Args:
-            from_date: Start date (inclusive).
-            to_date: End date (inclusive).
-            fmt: "csv" returns a list of UsageReading; "xml" returns raw XML string.
-
-        Returns:
-            list[UsageReading] for CSV format, raw XML string for XML format.
-
-        Raises:
-            EnovaError: On download failure or invalid parameters.
-            EnovaConnectionError: On network failure.
-        """
-        if (to_date - from_date).days > MAX_RANGE_DAYS:
-            raise EnovaError(
-                f"Date range cannot exceed {MAX_RANGE_DAYS} days. "
-                f"Use download_usage_chunked() for longer ranges."
-            )
-        if to_date < from_date:
-            raise EnovaError("from_date must be before to_date")
-        if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
-
-        session = await self._ensure_session()
-
-        form_data = {
+    def _build_form_data(
+        self, from_date: date, to_date: date, *, csv_download: bool = True
+    ) -> dict[str, str]:
+        """Build the form data dict for a Green Button download request."""
+        return {
             "para": "greenButtonDownloadV3",
             "GB_iso_fromDate": from_date.isoformat(),
             "GB_iso_toDate": to_date.isoformat(),
@@ -201,13 +188,48 @@ class AsyncEnovaClient:
             "GB_month_to": f"{to_date.month:02d}",
             "GB_day_to": f"{to_date.day:02d}",
             "GB_year_to": str(to_date.year),
-            "downloadConsumption": "Y" if fmt == "csv" else "",
+            "downloadConsumption": "Y" if csv_download else "",
             "userAction": "",
             "tab": "GBDMD",
             "inquiryType": "electric",
             "selectedMeterId": self._meter_id,
             "hourlyOrDaily": "Hourly",
         }
+
+    def _validate_download_params(self, from_date: date, to_date: date) -> None:
+        """Validate date range and login state for download methods."""
+        if (to_date - from_date).days > MAX_RANGE_DAYS:
+            raise EnovaError(
+                f"Date range cannot exceed {MAX_RANGE_DAYS} days. "
+                f"Use download_usage_chunked() for longer ranges."
+            )
+        if to_date < from_date:
+            raise EnovaError("from_date must be before to_date")
+        if not self._meter_id:
+            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
+
+    async def download_usage(
+        self,
+        from_date: date,
+        to_date: date,
+    ) -> list[UsageReading]:
+        """Download smart meter usage data for a date range.
+
+        Args:
+            from_date: Start date (inclusive).
+            to_date: End date (inclusive).
+
+        Returns:
+            List of UsageReading with hourly kWh and TOU totals.
+
+        Raises:
+            EnovaError: On download failure or invalid parameters.
+            EnovaConnectionError: On network failure.
+        """
+        self._validate_download_params(from_date, to_date)
+        session = await self._ensure_session()
+
+        form_data = self._build_form_data(from_date, to_date, csv_download=True)
 
         try:
             async with session.post(
@@ -217,21 +239,6 @@ class AsyncEnovaClient:
                 text = await resp.text()
         except aiohttp.ClientError as err:
             raise EnovaConnectionError(f"Download request failed: {err}") from err
-
-        if fmt == "xml":
-            soup = BeautifulSoup(text, "html.parser")
-            xml_form = soup.find("form", {"name": "downloadXml"})
-            if xml_form:
-                xml_url = xml_form.get("action", "")
-                if not xml_url.startswith("http"):
-                    xml_url = BASE_URL + xml_url
-                try:
-                    async with session.post(xml_url) as xml_resp:
-                        xml_resp.raise_for_status()
-                        return await xml_resp.text()
-                except aiohttp.ClientError as err:
-                    raise EnovaConnectionError(f"XML download failed: {err}") from err
-            raise EnovaError("Could not find XML download form in response")
 
         soup = BeautifulSoup(text, "html.parser")
         excel_form = soup.find("form", {"name": "downloadData2Spreadsheet"})
@@ -254,6 +261,54 @@ class AsyncEnovaClient:
 
         return parse_csv(csv_text)
 
+    async def download_usage_xml(
+        self,
+        from_date: date,
+        to_date: date,
+    ) -> str:
+        """Download smart meter usage data as Green Button XML.
+
+        Args:
+            from_date: Start date (inclusive).
+            to_date: End date (inclusive).
+
+        Returns:
+            Raw Green Button XML string.
+
+        Raises:
+            EnovaError: On download failure or invalid parameters.
+            EnovaConnectionError: On network failure.
+        """
+        self._validate_download_params(from_date, to_date)
+        session = await self._ensure_session()
+
+        form_data = self._build_form_data(from_date, to_date, csv_download=False)
+
+        try:
+            async with session.post(
+                f"{BASE_URL}/app/capricorn", data=form_data
+            ) as resp:
+                resp.raise_for_status()
+                text = await resp.text()
+        except aiohttp.ClientError as err:
+            raise EnovaConnectionError(f"Download request failed: {err}") from err
+
+        soup = BeautifulSoup(text, "html.parser")
+        xml_form = soup.find("form", {"name": "downloadXml"})
+        if not xml_form:
+            raise EnovaError("Could not find XML download form in response")
+
+        xml_url = xml_form.get("action", "")
+        if not xml_url.startswith("http"):
+            xml_url = BASE_URL + xml_url
+
+        try:
+            async with session.post(xml_url) as xml_resp:
+                xml_resp.raise_for_status()
+                return await xml_resp.text()
+        except aiohttp.ClientError as err:
+            raise EnovaConnectionError(f"XML download failed: {err}") from err
+
     async def download_usage_chunked(
         self,
         from_date: date,
@@ -273,12 +328,11 @@ class AsyncEnovaClient:
         current = from_date
         while current <= to_date:
             chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            result = await self.download_usage(current, chunk_end)
-            if isinstance(result, list):
-                for reading in result:
-                    if reading.date not in seen_dates:
-                        all_readings.append(reading)
-                        seen_dates.add(reading.date)
+            readings = await self.download_usage(current, chunk_end)
+            for reading in readings:
+                if reading.date not in seen_dates:
+                    all_readings.append(reading)
+                    seen_dates.add(reading.date)
             current = chunk_end + timedelta(days=1)
 
         return all_readings
@@ -347,6 +401,6 @@ class AsyncEnovaClient:
         to_date = date.today()
         from_date = to_date - timedelta(days=3)
         readings = await self.download_usage(from_date, to_date)
-        if isinstance(readings, list) and readings:
+        if readings:
             return readings[-1]
         return None

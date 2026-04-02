@@ -1,20 +1,16 @@
 """Tests for the async Enova Power client (primary implementation)."""
 
+import os
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
 import pytest
 
-from enovapower.async_client import AsyncEnovaClient
-from enovapower.client import (
-    BASE_URL,
-    EnovaAuthError,
-    EnovaConnectionError,
-    EnovaError,
-    parse_csv,
-)
+from enovapower.async_client import BASE_URL, AsyncEnovaClient
+from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
 from enovapower.models import TariffRate, UsageReading
+from enovapower.parsers import parse_csv
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -189,6 +185,40 @@ class TestAsyncClientInit:
 # AsyncEnovaClient.login tests
 # ---------------------------------------------------------------------------
 
+class TestAsyncLoginCredentials:
+    async def test_login_no_credentials_raises(self):
+        session = AsyncMock(spec=aiohttp.ClientSession)
+        client = AsyncEnovaClient(session=session)
+        with patch.dict(os.environ, {}, clear=True):
+            with pytest.raises(EnovaAuthError, match="Credentials required"):
+                await client.login()
+
+    async def test_login_from_env_vars(self):
+        login_resp = _mock_aiohttp_response(text=LOGIN_PAGE_HTML)
+        dashboard_resp = _mock_aiohttp_response(text=DASHBOARD_HTML)
+        session = _make_session(login_resp, dashboard_resp)
+        client = AsyncEnovaClient(session=session)
+
+        env = {"ENOVA_USERNAME": "1234567890", "ENOVA_PASSWORD": "secret"}
+        with patch.dict(os.environ, env, clear=True):
+            await client.login()
+
+        assert client.account_number == "1234567890"
+        assert client._meter_id == "111111"
+
+    async def test_explicit_args_override_env(self):
+        login_resp = _mock_aiohttp_response(text=LOGIN_PAGE_HTML)
+        dashboard_resp = _mock_aiohttp_response(text=DASHBOARD_HTML)
+        session = _make_session(login_resp, dashboard_resp)
+        client = AsyncEnovaClient(session=session)
+
+        env = {"ENOVA_USERNAME": "from_env", "ENOVA_PASSWORD": "from_env"}
+        with patch.dict(os.environ, env, clear=True):
+            await client.login("explicit_code", "explicit_pw")
+
+        assert client.account_number == "explicit_code"
+
+
 class TestAsyncLogin:
     async def test_login_success(self):
         login_resp = _mock_aiohttp_response(text=LOGIN_PAGE_HTML)
@@ -327,28 +357,6 @@ class TestAsyncDownloadUsage:
         with pytest.raises(EnovaError, match="spreadsheet download form"):
             await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
 
-    async def test_xml_download_success(self):
-        form_resp = _mock_aiohttp_response(text=XML_DOWNLOAD_RESPONSE_HTML)
-        xml_resp = _mock_aiohttp_response(text=SAMPLE_XML)
-        session = _make_session(form_resp, xml_resp)
-        client = self._make_client(session)
-
-        result = await client.download_usage(
-            date(2026, 3, 1), date(2026, 3, 1), fmt="xml"
-        )
-        assert isinstance(result, str)
-        assert "<?xml" in result
-
-    async def test_xml_download_missing_form(self):
-        resp = _mock_aiohttp_response(text="<html></html>")
-        session = _make_session(resp)
-        client = self._make_client(session)
-
-        with pytest.raises(EnovaError, match="XML download form"):
-            await client.download_usage(
-                date(2026, 3, 1), date(2026, 3, 1), fmt="xml"
-            )
-
     async def test_form_data_fields(self):
         form_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
         csv_resp = _mock_aiohttp_response(text=MINIMAL_CSV)
@@ -374,16 +382,57 @@ class TestAsyncDownloadUsage:
         assert data["inquiryType"] == "electric"
         assert data["tab"] == "GBDMD"
 
-    async def test_xml_format_sets_empty_download_consumption(self):
+
+# ---------------------------------------------------------------------------
+# AsyncEnovaClient.download_usage_xml tests
+# ---------------------------------------------------------------------------
+
+class TestAsyncDownloadUsageXml:
+    def _make_client(self, session, meter_id="111111"):
+        client = AsyncEnovaClient(session=session)
+        client._meter_id = meter_id
+        return client
+
+    async def test_xml_download_success(self):
         form_resp = _mock_aiohttp_response(text=XML_DOWNLOAD_RESPONSE_HTML)
         xml_resp = _mock_aiohttp_response(text=SAMPLE_XML)
         session = _make_session(form_resp, xml_resp)
         client = self._make_client(session)
 
-        await client.download_usage(date(2026, 3, 1), date(2026, 3, 1), fmt="xml")
+        result = await client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
+        assert isinstance(result, str)
+        assert "<?xml" in result
+
+    async def test_xml_download_missing_form(self):
+        resp = _mock_aiohttp_response(text="<html></html>")
+        session = _make_session(resp)
+        client = self._make_client(session)
+
+        with pytest.raises(EnovaError, match="XML download form"):
+            await client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
+
+    async def test_xml_form_data_sets_empty_download_consumption(self):
+        form_resp = _mock_aiohttp_response(text=XML_DOWNLOAD_RESPONSE_HTML)
+        xml_resp = _mock_aiohttp_response(text=SAMPLE_XML)
+        session = _make_session(form_resp, xml_resp)
+        client = self._make_client(session)
+
+        await client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
 
         data = session.post.call_args_list[0][1]["data"]
         assert data["downloadConsumption"] == ""
+
+    async def test_date_range_exceeds_max(self):
+        session = AsyncMock(spec=aiohttp.ClientSession)
+        client = self._make_client(session)
+        with pytest.raises(EnovaError, match="cannot exceed"):
+            await client.download_usage_xml(date(2026, 1, 1), date(2026, 7, 1))
+
+    async def test_not_logged_in(self):
+        session = AsyncMock(spec=aiohttp.ClientSession)
+        client = self._make_client(session, meter_id=None)
+        with pytest.raises(EnovaError, match="Not logged in"):
+            await client.download_usage_xml(date(2026, 2, 25), date(2026, 3, 26))
 
 
 # ---------------------------------------------------------------------------

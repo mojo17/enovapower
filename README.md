@@ -40,8 +40,8 @@ for r in readings:
 from enovapower import AsyncEnovaClient
 
 async with AsyncEnovaClient() as client:
-    await client.async_login("your_account_number", "your_password")
-    readings = await client.async_download_usage(from_date, to_date)
+    await client.login("your_account_number", "your_password")
+    readings = await client.download_usage(from_date, to_date)
 ```
 
 ## Local storage

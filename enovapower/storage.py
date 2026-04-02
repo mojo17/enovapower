@@ -7,6 +7,7 @@ from datetime import date, timedelta
 from pathlib import Path
 
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
+from enovapower.protocols import AsyncClientProtocol, SyncClientProtocol
 
 TOU_COLS = ["total_on_peak", "total_mid_peak", "total_off_peak"]
 DATA_COLS = HOUR_KEYS + TOU_COLS + ["total"]
@@ -249,7 +250,7 @@ class UsageStore:
             for row in rows
         ]
 
-    def seed(self, client, months: int = 12) -> list[UsageReading]:
+    def seed(self, client: SyncClientProtocol, months: int = 12) -> list[UsageReading]:
         """Download historical data and store it.
 
         Downloads the last ``months`` months of data using the client
@@ -273,7 +274,7 @@ class UsageStore:
             self.save(client.meter_id, readings)
         return readings
 
-    def update(self, client) -> list[UsageReading]:
+    def update(self, client: SyncClientProtocol) -> list[UsageReading]:
         """Download new data since the last stored record and save it.
 
         If no prior data exists, falls back to ``seed()``.
@@ -302,7 +303,7 @@ class UsageStore:
             self.save(client.meter_id, readings)
         return readings
 
-    async def async_seed(self, client, months: int = 12) -> list[UsageReading]:
+    async def async_seed(self, client: AsyncClientProtocol, months: int = 12) -> list[UsageReading]:
         """Async version of :meth:`seed`.
 
         Args:
@@ -320,7 +321,7 @@ class UsageStore:
             self.save(client.meter_id, readings)
         return readings
 
-    async def async_update(self, client) -> list[UsageReading]:
+    async def async_update(self, client: AsyncClientProtocol) -> list[UsageReading]:
         """Async version of :meth:`update`.
 
         Args:

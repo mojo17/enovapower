@@ -3,7 +3,7 @@
 from datetime import date  # noqa: F401 — used in commented example below
 from pathlib import Path
 
-from enovapower.client import parse_csv
+from enovapower.parsers import parse_csv
 
 # --- Parse an existing CSV file ---
 csv_file = Path("tests/data/SmartMeter1234567890_2026-03-2712.47.47.csv")

@@ -39,7 +39,7 @@ print(client.meter_id)        # e.g. "111111"
 print(client.account_number)  # e.g. "1234567890"
 ```
 
-The client maintains a `requests.Session` internally, so the login session persists across multiple download calls. If the session expires, you will need to call `login()` again.
+The client maintains an `aiohttp.ClientSession` internally, so the login session persists across multiple download calls. If the session expires, you will need to call `login()` again.
 
 ---
 
@@ -65,10 +65,9 @@ for r in readings:
 To get the raw Green Button XML export instead:
 
 ```python
-xml_data = client.download_usage(
+xml_data = client.download_usage_xml(
     from_date=date(2026, 2, 25),
     to_date=date(2026, 3, 26),
-    fmt="xml",
 )
 print(xml_data[:200])  # raw XML string
 ```
@@ -105,7 +104,7 @@ If you already have a CSV file downloaded from the portal, you can parse it dire
 
 ```python
 from pathlib import Path
-from enovapower.client import parse_csv
+from enovapower.parsers import parse_csv
 
 csv_text = Path("SmartMeter1234567890_2026-03-2712.47.47.csv").read_text()
 readings = parse_csv(csv_text)
@@ -125,19 +124,19 @@ from enovapower import AsyncEnovaClient
 
 async def main():
     async with AsyncEnovaClient() as client:
-        await client.async_login("1234567890", "your_password")
+        await client.login("1234567890", "your_password")
 
         # Download usage data
-        readings = await client.async_download_usage(
+        readings = await client.download_usage(
             from_date=date(2026, 2, 25),
             to_date=date(2026, 3, 26),
         )
 
         # Get the latest reading
-        latest = await client.async_get_latest_usage()
+        latest = await client.get_latest_usage()
 
         # Download tariff rates
-        rates = await client.async_download_tariff(
+        rates = await client.download_tariff(
             from_date=date(2026, 2, 25),
             to_date=date(2026, 3, 26),
         )
@@ -303,7 +302,7 @@ Returned by `download_tariff()` and `store.load_tariff()`.
 The library raises specific exceptions for different failure modes:
 
 ```python
-from enovapower.client import EnovaError, EnovaAuthError, EnovaConnectionError
+from enovapower import EnovaError, EnovaAuthError, EnovaConnectionError
 
 try:
     client.login("bad_account", "bad_password")
