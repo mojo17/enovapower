@@ -6,18 +6,27 @@ This is the primary implementation. The synchronous ``EnovaClient`` in
 
 from __future__ import annotations
 
+import asyncio
 import os
 from datetime import date, timedelta
+from typing import Any
 
 import aiohttp
 from bs4 import BeautifulSoup
 
-from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
+from enovapower.exceptions import (
+    EnovaAuthError,
+    EnovaError,
+    EnovaNetworkError,
+    EnovaSessionExpiredError,
+)
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
 
-BASE_URL = "https://myaccount.enovapower.com"
+_DEFAULT_BASE_URL = "https://myaccount.enovapower.com"
 MAX_RANGE_DAYS = 90
+_DEFAULT_RETRIES = 3
+_DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30)
 
 # The portal blocks requests with non-browser User-Agent headers, so we
 # present as a standard browser to avoid 403 or empty responses.
@@ -27,6 +36,9 @@ _USER_AGENT = (
     "Chrome/120.0.0.0 Safari/537.36"
 )
 
+# HTTP status codes that warrant a retry.
+_RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
 
 class AsyncEnovaClient:
     """Async client for Enova Power smart meter data downloads.
@@ -35,6 +47,13 @@ class AsyncEnovaClient:
     Accepts an optional ``aiohttp.ClientSession`` so the caller can manage
     the session lifecycle.
 
+    Args:
+        session: Optional external session. If provided, the client will
+            not close it on ``close()``.
+        retries: Number of retries for transient network errors and
+            server errors (HTTP 429/5xx). Defaults to 3. Set to 0 to
+            disable retries.
+
     Usage::
 
         async with AsyncEnovaClient() as client:
@@ -42,18 +61,72 @@ class AsyncEnovaClient:
             readings = await client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     """
 
-    def __init__(self, session: aiohttp.ClientSession | None = None) -> None:
+    def __init__(
+        self,
+        session: aiohttp.ClientSession | None = None,
+        retries: int = _DEFAULT_RETRIES,
+        base_url: str = _DEFAULT_BASE_URL,
+    ) -> None:
         self._external_session = session is not None
         self._session = session
         self._meter_id: str | None = None
         self._account_number: str | None = None
+        self._access_code: str | None = None
+        self._password: str | None = None
+        self._retries = max(retries, 0)
+        self._base_url = base_url.rstrip("/")
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession(
                 headers={"User-Agent": _USER_AGENT},
+                timeout=_DEFAULT_TIMEOUT,
             )
+        elif self._external_session:
+            # Merge User-Agent into external sessions to avoid 403s from the portal.
+            if "User-Agent" not in self._session.headers:
+                self._session.headers["User-Agent"] = _USER_AGENT
         return self._session
+
+    async def _request(
+        self,
+        method: str,
+        url: str,
+        *,
+        error_msg: str = "Request failed",
+        **kwargs: Any,
+    ) -> tuple[str, str]:
+        """Execute an HTTP request with retry and exponential backoff.
+
+        Retries on transient errors (connection failures, HTTP 429/5xx).
+        Does **not** retry on 4xx client errors (permanent failures).
+
+        Returns:
+            A ``(body_text, final_url)`` tuple.
+        """
+        session = await self._ensure_session()
+        last_err: Exception | None = None
+        for attempt in range(self._retries + 1):
+            try:
+                async with session.request(method, url, **kwargs) as resp:
+                    if resp.status in _RETRYABLE_STATUSES:
+                        if attempt < self._retries:
+                            await asyncio.sleep(2**attempt)
+                            continue
+                        resp.raise_for_status()
+                    resp.raise_for_status()
+                    text = await resp.text()
+                    return text, str(resp.url)
+            except aiohttp.ClientResponseError as err:
+                # Response errors (4xx/5xx) that weren't retried above
+                # are permanent — don't retry, convert and raise now.
+                raise EnovaNetworkError(f"{error_msg}: {err}") from err
+            except aiohttp.ClientError as err:
+                last_err = err
+                if attempt < self._retries:
+                    await asyncio.sleep(2**attempt)
+                    continue
+        raise EnovaNetworkError(f"{error_msg}: {last_err}") from last_err
 
     async def __aenter__(self) -> AsyncEnovaClient:
         return self
@@ -92,7 +165,7 @@ class AsyncEnovaClient:
 
         Raises:
             EnovaAuthError: If login fails or credentials are missing.
-            EnovaConnectionError: On network failure.
+            EnovaNetworkError: On network failure.
         """
         access_code = access_code or os.environ.get("ENOVA_USERNAME")
         password = password or os.environ.get("ENOVA_PASSWORD")
@@ -102,14 +175,15 @@ class AsyncEnovaClient:
                 "Credentials required. Pass access_code/password or set "
                 "ENOVA_USERNAME and ENOVA_PASSWORD environment variables."
             )
-        session = await self._ensure_session()
 
-        try:
-            async with session.get(f"{BASE_URL}/app/login.jsp") as resp:
-                resp.raise_for_status()
-                text = await resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"Failed to reach login page: {err}") from err
+        self._access_code = access_code
+        self._password = password
+
+        text, _ = await self._request(
+            "GET",
+            f"{self._base_url}/app/login.jsp",
+            error_msg="Failed to reach login page",
+        )
 
         soup = BeautifulSoup(text, "html.parser")
         csrf_token = soup.find("input", {"name": "jspCSRFToken"})
@@ -124,17 +198,13 @@ class AsyncEnovaClient:
             "nextPara": "",
         }
 
-        try:
-            async with session.post(
-                f"{BASE_URL}/app/capricorn",
-                data=login_data,
-                params={"para": "index"},
-            ) as resp:
-                resp.raise_for_status()
-                text = await resp.text()
-                final_url = str(resp.url)
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"Login request failed: {err}") from err
+        text, final_url = await self._request(
+            "POST",
+            f"{self._base_url}/app/capricorn",
+            data=login_data,
+            params={"para": "index"},
+            error_msg="Login request failed",
+        )
 
         if "sessionExpired" in final_url or "login.jsp" in final_url:
             raise EnovaAuthError("Login failed — check access code and password")
@@ -151,26 +221,48 @@ class AsyncEnovaClient:
             self._meter_id = href.split("inMeterID=")[-1]
 
         if not self._meter_id:
-            session = await self._ensure_session()
             try:
-                async with session.get(
-                    f"{BASE_URL}/app/capricorn",
+                text, _ = await self._request(
+                    "GET",
+                    f"{self._base_url}/app/capricorn",
                     params={
                         "para": "smartMeterConsumV3",
                         "inquiryType": "Electric",
                         "tab": "SMCONSUMV3",
                     },
-                ) as resp:
-                    if resp.ok:
-                        text = await resp.text()
-                        iframe_soup = BeautifulSoup(text, "html.parser")
-                        meter_input = iframe_soup.find(
-                            "input", {"name": "selectedMeterId"}
-                        )
-                        if meter_input:
-                            self._meter_id = meter_input["value"]
-            except aiohttp.ClientError:
+                    error_msg="Failed to fetch meter info",
+                )
+                iframe_soup = BeautifulSoup(text, "html.parser")
+                meter_input = iframe_soup.find(
+                    "input", {"name": "selectedMeterId"}
+                )
+                if meter_input:
+                    self._meter_id = meter_input["value"]
+            except EnovaNetworkError:
                 pass
+
+    @staticmethod
+    def _is_session_expired(url: str) -> bool:
+        """Return True if the response URL indicates a session expiry."""
+        return "sessionExpired" in url or "login.jsp" in url
+
+    async def _relogin(self) -> None:
+        """Re-login using stored credentials.
+
+        Raises:
+            EnovaSessionExpiredError: If credentials are unavailable or
+                re-login fails.
+        """
+        if not self._access_code or not self._password:
+            raise EnovaSessionExpiredError(
+                "Session expired and no stored credentials for re-login."
+            )
+        try:
+            await self.login(self._access_code, self._password)
+        except EnovaAuthError as err:
+            raise EnovaSessionExpiredError(
+                f"Session expired and re-login failed: {err}"
+            ) from err
 
     def _build_form_data(
         self, from_date: date, to_date: date, *, csv_download: bool = True
@@ -215,6 +307,8 @@ class AsyncEnovaClient:
     ) -> list[UsageReading]:
         """Download smart meter usage data for a date range.
 
+        If the session has expired, attempts to re-login once and retry.
+
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
@@ -224,21 +318,29 @@ class AsyncEnovaClient:
 
         Raises:
             EnovaError: On download failure or invalid parameters.
-            EnovaConnectionError: On network failure.
+            EnovaSessionExpiredError: If session expired and re-login failed.
+            EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
-        session = await self._ensure_session()
 
         form_data = self._build_form_data(from_date, to_date, csv_download=True)
 
-        try:
-            async with session.post(
-                f"{BASE_URL}/app/capricorn", data=form_data
-            ) as resp:
-                resp.raise_for_status()
-                text = await resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"Download request failed: {err}") from err
+        text, resp_url = await self._request(
+            "POST",
+            f"{self._base_url}/app/capricorn",
+            data=form_data,
+            error_msg="Download request failed",
+        )
+
+        if self._is_session_expired(resp_url):
+            await self._relogin()
+            form_data = self._build_form_data(from_date, to_date, csv_download=True)
+            text, _ = await self._request(
+                "POST",
+                f"{self._base_url}/app/capricorn",
+                data=form_data,
+                error_msg="Download request failed after re-login",
+            )
 
         soup = BeautifulSoup(text, "html.parser")
         excel_form = soup.find("form", {"name": "downloadData2Spreadsheet"})
@@ -250,14 +352,13 @@ class AsyncEnovaClient:
 
         export_url = excel_form.get("action", "")
         if not export_url.startswith("http"):
-            export_url = BASE_URL + export_url
+            export_url = self._base_url + export_url
 
-        try:
-            async with session.post(export_url) as csv_resp:
-                csv_resp.raise_for_status()
-                csv_text = await csv_resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"CSV download failed: {err}") from err
+        csv_text, _ = await self._request(
+            "POST",
+            export_url,
+            error_msg="CSV download failed",
+        )
 
         return parse_csv(csv_text)
 
@@ -268,6 +369,8 @@ class AsyncEnovaClient:
     ) -> str:
         """Download smart meter usage data as Green Button XML.
 
+        If the session has expired, attempts to re-login once and retry.
+
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
@@ -277,21 +380,29 @@ class AsyncEnovaClient:
 
         Raises:
             EnovaError: On download failure or invalid parameters.
-            EnovaConnectionError: On network failure.
+            EnovaSessionExpiredError: If session expired and re-login failed.
+            EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
-        session = await self._ensure_session()
 
         form_data = self._build_form_data(from_date, to_date, csv_download=False)
 
-        try:
-            async with session.post(
-                f"{BASE_URL}/app/capricorn", data=form_data
-            ) as resp:
-                resp.raise_for_status()
-                text = await resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"Download request failed: {err}") from err
+        text, resp_url = await self._request(
+            "POST",
+            f"{self._base_url}/app/capricorn",
+            data=form_data,
+            error_msg="Download request failed",
+        )
+
+        if self._is_session_expired(resp_url):
+            await self._relogin()
+            form_data = self._build_form_data(from_date, to_date, csv_download=False)
+            text, _ = await self._request(
+                "POST",
+                f"{self._base_url}/app/capricorn",
+                data=form_data,
+                error_msg="Download request failed after re-login",
+            )
 
         soup = BeautifulSoup(text, "html.parser")
         xml_form = soup.find("form", {"name": "downloadXml"})
@@ -300,14 +411,15 @@ class AsyncEnovaClient:
 
         xml_url = xml_form.get("action", "")
         if not xml_url.startswith("http"):
-            xml_url = BASE_URL + xml_url
+            xml_url = self._base_url + xml_url
 
-        try:
-            async with session.post(xml_url) as xml_resp:
-                xml_resp.raise_for_status()
-                return await xml_resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"XML download failed: {err}") from err
+        xml_text, _ = await self._request(
+            "POST",
+            xml_url,
+            error_msg="XML download failed",
+        )
+
+        return xml_text
 
     async def download_usage_chunked(
         self,
@@ -344,6 +456,8 @@ class AsyncEnovaClient:
     ) -> list[TariffRate]:
         """Download tariff rates from the Price Comparison page.
 
+        If the session has expired, attempts to re-login once and retry.
+
         Args:
             from_date: Start date of the usage period to query (inclusive).
             to_date: End date of the usage period to query (inclusive).
@@ -353,7 +467,8 @@ class AsyncEnovaClient:
 
         Raises:
             EnovaError: On download failure or invalid parameters.
-            EnovaConnectionError: On network failure.
+            EnovaSessionExpiredError: If session expired and re-login failed.
+            EnovaNetworkError: On network failure.
         """
         if (to_date - from_date).days > MAX_RANGE_DAYS:
             raise EnovaError(f"Date range cannot exceed {MAX_RANGE_DAYS} days.")
@@ -362,26 +477,32 @@ class AsyncEnovaClient:
         if not self._meter_id:
             raise EnovaError("Not logged in or meter ID not found. Call login() first.")
 
-        session = await self._ensure_session()
+        tariff_params = {
+            "para": "smartMeterPriceCompV3",
+            "inquiryType": "hydro",
+            "fromYear": str(from_date.year),
+            "fromMonth": f"{from_date.month:02d}",
+            "fromDay": f"{from_date.day:02d}",
+            "toYear": str(to_date.year),
+            "toMonth": f"{to_date.month:02d}",
+            "toDay": f"{to_date.day:02d}",
+        }
 
-        try:
-            async with session.get(
-                f"{BASE_URL}/app/capricorn",
-                params={
-                    "para": "smartMeterPriceCompV3",
-                    "inquiryType": "hydro",
-                    "fromYear": str(from_date.year),
-                    "fromMonth": f"{from_date.month:02d}",
-                    "fromDay": f"{from_date.day:02d}",
-                    "toYear": str(to_date.year),
-                    "toMonth": f"{to_date.month:02d}",
-                    "toDay": f"{to_date.day:02d}",
-                },
-            ) as resp:
-                resp.raise_for_status()
-                text = await resp.text()
-        except aiohttp.ClientError as err:
-            raise EnovaConnectionError(f"Tariff download failed: {err}") from err
+        text, resp_url = await self._request(
+            "GET",
+            f"{self._base_url}/app/capricorn",
+            params=tariff_params,
+            error_msg="Tariff download failed",
+        )
+
+        if self._is_session_expired(resp_url):
+            await self._relogin()
+            text, _ = await self._request(
+                "GET",
+                f"{self._base_url}/app/capricorn",
+                params=tariff_params,
+                error_msg="Tariff download failed after re-login",
+            )
 
         return parse_tariff_html(text)
 
@@ -396,7 +517,7 @@ class AsyncEnovaClient:
 
         Raises:
             EnovaError: If not logged in.
-            EnovaConnectionError: On network failure.
+            EnovaNetworkError: On network failure.
         """
         to_date = date.today()
         from_date = to_date - timedelta(days=3)

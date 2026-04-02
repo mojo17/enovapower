@@ -3,6 +3,7 @@
 from __future__ import annotations
 
 import sqlite3
+import threading
 from datetime import date, timedelta
 from pathlib import Path
 
@@ -68,7 +69,8 @@ class UsageStore:
 
     def __init__(self, db_path: str | Path = "enova_usage.db") -> None:
         self._db_path = str(db_path)
-        self._conn = sqlite3.connect(self._db_path)
+        self._lock = threading.Lock()
+        self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_TARIFF_TABLE)
         self._conn.commit()
@@ -81,7 +83,8 @@ class UsageStore:
 
     def close(self) -> None:
         """Close the database connection."""
-        self._conn.close()
+        with self._lock:
+            self._conn.close()
 
     def save(self, meter_id: str, readings: list[UsageReading]) -> int:
         """Save usage readings to the database.
@@ -107,8 +110,9 @@ class UsageStore:
             )
             rows.append(values)
 
-        self._conn.executemany(_INSERT, rows)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(_INSERT, rows)
+            self._conn.commit()
         return len(rows)
 
     def load(
@@ -141,8 +145,9 @@ class UsageStore:
 
         query += " ORDER BY date"
 
-        cursor = self._conn.execute(query, params)
-        rows = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(query, params)
+            rows = cursor.fetchall()
 
         readings: list[UsageReading] = []
         for row in rows:
@@ -167,11 +172,12 @@ class UsageStore:
         Returns:
             The latest date as a datetime.date, or None.
         """
-        cursor = self._conn.execute(
-            "SELECT MAX(date) FROM usage WHERE meter_id = ?",
-            [meter_id],
-        )
-        row = cursor.fetchone()
+        with self._lock:
+            cursor = self._conn.execute(
+                "SELECT MAX(date) FROM usage WHERE meter_id = ?",
+                [meter_id],
+            )
+            row = cursor.fetchone()
         if row and row[0]:
             return date.fromisoformat(row[0])
         return None
@@ -201,8 +207,9 @@ class UsageStore:
                 r.description,
             ))
 
-        self._conn.executemany(_INSERT_TARIFF, rows)
-        self._conn.commit()
+        with self._lock:
+            self._conn.executemany(_INSERT_TARIFF, rows)
+            self._conn.commit()
         return len(rows)
 
     def load_tariff(
@@ -235,8 +242,9 @@ class UsageStore:
 
         query += " ORDER BY start_date, plan, name"
 
-        cursor = self._conn.execute(query, params)
-        rows = cursor.fetchall()
+        with self._lock:
+            cursor = self._conn.execute(query, params)
+            rows = cursor.fetchall()
 
         return [
             TariffRate(
@@ -347,7 +355,13 @@ class UsageStore:
 
 
 def _months_ago(ref: date, months: int) -> date:
-    """Return a date approximately ``months`` months before ``ref``."""
+    """Return a date approximately ``months`` months before ``ref``.
+
+    The day component is clamped to 28 to avoid invalid dates (e.g.
+    subtracting 1 month from March 31 would otherwise produce Feb 31).
+    This is intentional — the function is used for "roughly N months ago"
+    backfill ranges where single-day precision is not important.
+    """
     year = ref.year
     month = ref.month - months
     while month <= 0:

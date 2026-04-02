@@ -1,74 +1,44 @@
 """Tests for parsers, exceptions, and the sync EnovaClient facade."""
 
 from datetime import date
-from pathlib import Path
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from enovapower.client import EnovaClient
-from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
+from enovapower.exceptions import EnovaAuthError, EnovaError, EnovaNetworkError
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
 
-# ---------------------------------------------------------------------------
-# Fixtures & helpers
-# ---------------------------------------------------------------------------
-
-SAMPLE_CSV = (
-    Path(__file__).resolve().parent / "data"
-    / "SmartMeter1234567890_2026-03-2712.47.47.csv"
-)
-
-MINIMAL_CSV = (
-    '"Reading Date","1 am kWh Usage","2 am kWh Usage","3 am kWh Usage",'
-    '"4 am kWh Usage","5 am kWh Usage","6 am kWh Usage","7 am kWh Usage",'
-    '"8 am kWh Usage","9 am kWh Usage","10 am kWh Usage","11 am kWh Usage",'
-    '"12 pm kWh Usage","1 pm kWh Usage","2 pm kWh Usage","3 pm kWh Usage",'
-    '"4 pm kWh Usage","5 pm kWh Usage","6 pm kWh Usage","7 pm kWh Usage",'
-    '"8 pm kWh Usage","9 pm kWh Usage","10 pm kWh Usage","11 pm kWh Usage",'
-    '"12 pm kWh Usage","[touInquiry_download_Total_TOU_ON_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_MID_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_OFF_Peak_Consumption]"\n'
-    '"2026-03-01","1.00","2.00","3.00","4.00","5.00","6.00","7.00","8.00",'
-    '"9.00","10.00","11.00","12.00","1.00","2.00","3.00","4.00","5.00",'
-    '"6.00","7.00","8.00","9.00","10.00","11.00","12.00","1.50","2.50","3.50"\n'
-)
-
+from .conftest import MINIMAL_CSV, MULTI_ROW_CSV, TARIFF_HTML
 
 # ---------------------------------------------------------------------------
 # parse_csv tests
 # ---------------------------------------------------------------------------
 
 class TestParseCsv:
-    def test_parse_real_file(self):
-        """Parse the actual downloaded CSV file."""
-        if not SAMPLE_CSV.exists():
-            pytest.skip("Sample CSV not present")
-        readings = parse_csv(SAMPLE_CSV.read_text())
-        assert len(readings) == 30
-        r = readings[0]
-        assert isinstance(r, UsageReading)
-        assert "h01" in r.hourly
-        assert "h24" in r.hourly
-        assert r.total > 0
-        assert r.total_on_peak >= 0
-        assert r.total_mid_peak >= 0
-        assert r.total_off_peak >= 0
+    def test_parse_multi_row_csv(self):
+        """Parse a multi-row synthetic CSV."""
+        readings = parse_csv(MULTI_ROW_CSV)
+        assert len(readings) == 3
+        for r in readings:
+            assert isinstance(r, UsageReading)
+            assert "h01" in r.hourly
+            assert "h24" in r.hourly
+            assert r.total > 0
+            assert r.total_on_peak >= 0
+            assert r.total_mid_peak >= 0
+            assert r.total_off_peak >= 0
 
-    def test_parse_real_file_date_range(self):
-        """Verify date range in the parsed data."""
-        if not SAMPLE_CSV.exists():
-            pytest.skip("Sample CSV not present")
-        readings = parse_csv(SAMPLE_CSV.read_text())
+    def test_parse_multi_row_date_range(self):
+        """Verify date range in multi-row parsed data."""
+        readings = parse_csv(MULTI_ROW_CSV)
         assert readings[0].date == date(2026, 2, 25)
-        assert readings[-1].date == date(2026, 3, 26)
+        assert readings[-1].date == date(2026, 2, 27)
 
-    def test_parse_real_file_values(self):
+    def test_parse_multi_row_values(self):
         """Spot-check specific values from the first row."""
-        if not SAMPLE_CSV.exists():
-            pytest.skip("Sample CSV not present")
-        readings = parse_csv(SAMPLE_CSV.read_text())
+        readings = parse_csv(MULTI_ROW_CSV)
         first = readings[0]
         assert first.hourly["h01"] == 4.00
         assert first.hourly["h02"] == 0.88
@@ -119,56 +89,15 @@ class TestParseCsv:
         expected_keys = [f"h{i:02d}" for i in range(1, 25)]
         assert list(r.hourly.keys()) == expected_keys
 
+    def test_parse_csv_raises_on_empty_string(self):
+        """Empty string raises EnovaError."""
+        with pytest.raises(EnovaError, match="empty CSV"):
+            parse_csv("")
 
-# ---------------------------------------------------------------------------
-# Tariff HTML fixture
-# ---------------------------------------------------------------------------
-
-TARIFF_HTML = (
-    "<html><body>"
-    "<h5><strong>Ultra-Low Overnight Pricing:"
-    " Nov 01, 2025 - Oct 31, 2026</strong></h5>"
-    "<table id='pricingTableForULO0'>"
-    "<thead><tr><th>Electricity</th>"
-    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
-    "<tbody>"
-    "<tr><td>ULO Lon-peak</td><td>3.90</td>"
-    "<td>Every day 11 p.m. - 7 a.m.</td></tr>"
-    "<tr><td>ULO Off-peak</td><td>9.80</td>"
-    "<td>Weekends and holidays 7 a.m. - 11 p.m.</td></tr>"
-    "<tr><td>ULO Mid-peak</td><td>15.70</td>"
-    "<td>Weekdays 7 a.m. - 4 p.m. and 9 p.m. to 11 p.m.</td></tr>"
-    "<tr><td>ULO On-peak</td><td>39.10</td>"
-    "<td>Weekdays 4 p.m. - 9 p.m.</td></tr>"
-    "</tbody></table>"
-    "<h5><strong>Time-of-Use Pricing:"
-    " Nov 01, 2025 - Apr 30, 2026</strong></h5>"
-    "<table id='pricingTableForTOU0'>"
-    "<thead><tr><th>Electricity</th>"
-    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
-    "<tbody>"
-    "<tr><td>TOU Off-peak</td><td>9.80</td>"
-    "<td>Weekends and holidays all day and "
-    "Weekdays 7 p.m. - 7 a.m.</td></tr>"
-    "<tr><td>TOU Mid-peak</td><td>15.70</td>"
-    "<td>Weekdays 11 a.m. - 5 p.m.</td></tr>"
-    "<tr><td>TOU On-peak</td><td>20.30</td>"
-    "<td>Weekdays 7 a.m. - 11 a.m. and "
-    "5 p.m. - 7 p.m.</td></tr>"
-    "</tbody></table>"
-    "<h5><strong>Tiered Price Plan Pricing:"
-    " Nov 01, 2025 - Apr 30, 2026</strong></h5>"
-    "<table id='pricingTableForTr0'>"
-    "<thead><tr><th>Electricity</th><th>Price</th>"
-    "<th>Threshold Start</th><th>Threshold End</th></tr></thead>"
-    "<tbody>"
-    "<tr><td>Tier 1</td><td>12.0000</td>"
-    "<td>0.0</td><td>1000.0</td></tr>"
-    "<tr><td>Tier 2</td><td>14.2000</td>"
-    "<td>1000.0</td><td>Infinity</td></tr>"
-    "</tbody></table>"
-    "</body></html>"
-)
+    def test_parse_csv_raises_on_whitespace_only(self):
+        """Whitespace-only string raises EnovaError."""
+        with pytest.raises(EnovaError, match="empty CSV"):
+            parse_csv("   \n  ")
 
 
 # ---------------------------------------------------------------------------
@@ -247,6 +176,7 @@ class TestSyncFacade:
         ) as mock_login:
             client.login("acct", "pw")
             mock_login.assert_awaited_once_with("acct", "pw")
+        client.close()
 
     def test_download_usage_delegates_to_async(self):
         client = EnovaClient()
@@ -257,6 +187,7 @@ class TestSyncFacade:
             result = client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
             mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
             assert result == readings
+        client.close()
 
     def test_download_usage_xml_delegates_to_async(self):
         client = EnovaClient()
@@ -267,6 +198,7 @@ class TestSyncFacade:
             result = client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
             mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
             assert result == "<xml/>"
+        client.close()
 
     def test_download_usage_chunked_delegates_to_async(self):
         client = EnovaClient()
@@ -280,6 +212,7 @@ class TestSyncFacade:
             )
             mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 10))
             assert result == readings
+        client.close()
 
     def test_download_tariff_delegates_to_async(self):
         client = EnovaClient()
@@ -290,6 +223,7 @@ class TestSyncFacade:
             result = client.download_tariff(date(2026, 3, 1), date(2026, 3, 26))
             mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 26))
             assert result == []
+        client.close()
 
     def test_get_latest_usage_delegates_to_async(self):
         client = EnovaClient()
@@ -301,16 +235,24 @@ class TestSyncFacade:
             result = client.get_latest_usage()
             mock_dl.assert_awaited_once()
             assert result == reading
+        client.close()
 
     def test_meter_id_property(self):
         client = EnovaClient()
         client._async._meter_id = "111111"
         assert client.meter_id == "111111"
+        client.close()
 
     def test_account_number_property(self):
         client = EnovaClient()
         client._async._account_number = "1234567890"
         assert client.account_number == "1234567890"
+        client.close()
+
+    def test_base_url_passthrough(self):
+        client = EnovaClient(base_url="https://custom.example.com")
+        assert client._async._base_url == "https://custom.example.com"
+        client.close()
 
 
 # ---------------------------------------------------------------------------
@@ -321,8 +263,8 @@ class TestExceptions:
     def test_auth_error_is_enova_error(self):
         assert issubclass(EnovaAuthError, EnovaError)
 
-    def test_connection_error_is_enova_error(self):
-        assert issubclass(EnovaConnectionError, EnovaError)
+    def test_network_error_is_enova_error(self):
+        assert issubclass(EnovaNetworkError, EnovaError)
 
     def test_enova_error_is_exception(self):
         assert issubclass(EnovaError, Exception)
@@ -330,3 +272,45 @@ class TestExceptions:
     def test_raise_and_catch(self):
         with pytest.raises(EnovaError):
             raise EnovaAuthError("bad login")
+
+
+# ---------------------------------------------------------------------------
+# UsageReading model tests
+# ---------------------------------------------------------------------------
+
+class TestUsageReadingModel:
+    def test_post_init_computes_total(self):
+        """total auto-computed from hourly when not explicitly set."""
+        hourly = {f"h{i:02d}": 1.0 for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 1, 1), hourly=hourly)
+        assert reading.total == 24.0
+
+    def test_post_init_preserves_explicit_total(self):
+        """Explicit non-zero total is preserved."""
+        hourly = {f"h{i:02d}": 1.0 for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 1, 1), hourly=hourly, total=99.0)
+        assert reading.total == 99.0
+
+    def test_post_init_empty_hourly(self):
+        """Empty hourly dict keeps total at 0.0."""
+        reading = UsageReading(date=date(2026, 1, 1))
+        assert reading.total == 0.0
+
+    def test_repr(self):
+        reading = UsageReading(date=date(2026, 1, 1), total=24.5)
+        assert "2026-01-01" in repr(reading)
+        assert "24.50 kWh" in repr(reading)
+
+
+class TestTariffRateModel:
+    def test_repr(self):
+        rate = TariffRate(
+            start_date=date(2025, 11, 1),
+            end_date=date(2026, 4, 30),
+            plan="Time-of-Use",
+            name="TOU Off-peak",
+            price=9.80,
+        )
+        assert "Time-of-Use" in repr(rate)
+        assert "TOU Off-peak" in repr(rate)
+        assert "9.8" in repr(rate)

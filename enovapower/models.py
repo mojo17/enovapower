@@ -29,6 +29,13 @@ class UsageReading:
     total_off_peak: float = 0.0
     total: float = 0.0
 
+    def __post_init__(self) -> None:
+        if self.hourly and self.total == 0.0:
+            self.total = sum(self.hourly.values())
+
+    def __repr__(self) -> str:
+        return f"UsageReading(date={self.date}, total={self.total:.2f} kWh)"
+
 
 @dataclass
 class TariffRate:
@@ -49,3 +56,6 @@ class TariffRate:
     name: str
     price: float
     description: str = ""
+
+    def __repr__(self) -> str:
+        return f"TariffRate(plan={self.plan!r}, name={self.name!r}, price={self.price})"

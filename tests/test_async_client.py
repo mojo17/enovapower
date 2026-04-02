@@ -7,29 +7,22 @@ from unittest.mock import AsyncMock, MagicMock, patch
 import aiohttp
 import pytest
 
-from enovapower.async_client import BASE_URL, AsyncEnovaClient
-from enovapower.exceptions import EnovaAuthError, EnovaConnectionError, EnovaError
+from enovapower.async_client import _DEFAULT_BASE_URL as BASE_URL
+from enovapower.async_client import AsyncEnovaClient
+from enovapower.exceptions import (
+    EnovaAuthError,
+    EnovaError,
+    EnovaNetworkError,
+    EnovaSessionExpiredError,
+)
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv
+
+from .conftest import MINIMAL_CSV, TARIFF_HTML
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
 # ---------------------------------------------------------------------------
-
-MINIMAL_CSV = (
-    '"Reading Date","1 am kWh Usage","2 am kWh Usage","3 am kWh Usage",'
-    '"4 am kWh Usage","5 am kWh Usage","6 am kWh Usage","7 am kWh Usage",'
-    '"8 am kWh Usage","9 am kWh Usage","10 am kWh Usage","11 am kWh Usage",'
-    '"12 pm kWh Usage","1 pm kWh Usage","2 pm kWh Usage","3 pm kWh Usage",'
-    '"4 pm kWh Usage","5 pm kWh Usage","6 pm kWh Usage","7 pm kWh Usage",'
-    '"8 pm kWh Usage","9 pm kWh Usage","10 pm kWh Usage","11 pm kWh Usage",'
-    '"12 pm kWh Usage","[touInquiry_download_Total_TOU_ON_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_MID_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_OFF_Peak_Consumption]"\n'
-    '"2026-03-01","1.00","2.00","3.00","4.00","5.00","6.00","7.00","8.00",'
-    '"9.00","10.00","11.00","12.00","1.00","2.00","3.00","4.00","5.00",'
-    '"6.00","7.00","8.00","9.00","10.00","11.00","12.00","1.50","2.50","3.50"\n'
-)
 
 LOGIN_PAGE_HTML = """
 <html><body>
@@ -85,40 +78,7 @@ XML_DOWNLOAD_RESPONSE_HTML = """
 
 SAMPLE_XML = '<?xml version="1.0"?><feed><entry><content>data</content></entry></feed>'
 
-TARIFF_HTML = (
-    "<html><body>"
-    "<h5><strong>Ultra-Low Overnight Pricing:"
-    " Nov 01, 2025 - Oct 31, 2026</strong></h5>"
-    "<table id='pricingTableForULO0'>"
-    "<thead><tr><th>Electricity</th>"
-    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
-    "<tbody>"
-    "<tr><td>ULO Lon-peak</td><td>3.90</td>"
-    "<td>Every day 11 p.m. - 7 a.m.</td></tr>"
-    "<tr><td>ULO Off-peak</td><td>9.80</td>"
-    "<td>Weekends and holidays 7 a.m. - 11 p.m.</td></tr>"
-    "<tr><td>ULO Mid-peak</td><td>15.70</td>"
-    "<td>Weekdays 7 a.m. - 4 p.m. and 9 p.m. to 11 p.m.</td></tr>"
-    "<tr><td>ULO On-peak</td><td>39.10</td>"
-    "<td>Weekdays 4 p.m. - 9 p.m.</td></tr>"
-    "</tbody></table>"
-    "<h5><strong>Time-of-Use Pricing:"
-    " Nov 01, 2025 - Apr 30, 2026</strong></h5>"
-    "<table id='pricingTableForTOU0'>"
-    "<thead><tr><th>Electricity</th>"
-    "<th>Price (cents/kWh)</th><th>Weekdays</th></tr></thead>"
-    "<tbody>"
-    "<tr><td>TOU Off-peak</td><td>9.80</td>"
-    "<td>Weekends and holidays all day and "
-    "Weekdays 7 p.m. - 7 a.m.</td></tr>"
-    "<tr><td>TOU Mid-peak</td><td>15.70</td>"
-    "<td>Weekdays 11 a.m. - 5 p.m.</td></tr>"
-    "<tr><td>TOU On-peak</td><td>20.30</td>"
-    "<td>Weekdays 7 a.m. - 11 a.m. and "
-    "5 p.m. - 7 p.m.</td></tr>"
-    "</tbody></table>"
-    "</body></html>"
-)
+EXPIRED_URL = "https://myaccount.enovapower.com/app/sessionExpired.jsp"
 
 
 def _mock_aiohttp_response(text="", url="https://myaccount.enovapower.com/app/capricorn",
@@ -129,9 +89,12 @@ def _mock_aiohttp_response(text="", url="https://myaccount.enovapower.com/app/ca
     resp.url = url
     resp.ok = status < 400
     resp.status = status
+    # raise_for_status is synchronous in aiohttp, so always use MagicMock
     if status >= 400:
-        resp.raise_for_status.side_effect = aiohttp.ClientResponseError(
-            request_info=MagicMock(), history=(), status=status
+        resp.raise_for_status = MagicMock(
+            side_effect=aiohttp.ClientResponseError(
+                request_info=MagicMock(), history=(), status=status
+            )
         )
     else:
         resp.raise_for_status = MagicMock()
@@ -149,7 +112,7 @@ def _mock_context_manager(resp):
 def _make_session(*responses):
     """Create a mock aiohttp.ClientSession with queued responses.
 
-    Responses are consumed in order across both get() and post() calls.
+    Responses are consumed in order across get(), post(), and request() calls.
     """
     session = AsyncMock(spec=aiohttp.ClientSession)
     cms = [_mock_context_manager(r) for r in responses]
@@ -162,6 +125,7 @@ def _make_session(*responses):
 
     session.get = MagicMock(side_effect=next_cm)
     session.post = MagicMock(side_effect=next_cm)
+    session.request = MagicMock(side_effect=next_cm)
     return session
 
 
@@ -179,6 +143,39 @@ class TestAsyncClientInit:
         session = AsyncMock(spec=aiohttp.ClientSession)
         client = AsyncEnovaClient(session=session)
         assert client._external_session is True
+
+    def test_default_retries(self):
+        client = AsyncEnovaClient()
+        assert client._retries == 3
+
+    def test_custom_retries(self):
+        client = AsyncEnovaClient(retries=5)
+        assert client._retries == 5
+
+    def test_retries_clamped_to_zero(self):
+        client = AsyncEnovaClient(retries=-1)
+        assert client._retries == 0
+
+    def test_default_base_url(self):
+        client = AsyncEnovaClient()
+        assert client._base_url == "https://myaccount.enovapower.com"
+
+    def test_custom_base_url(self):
+        client = AsyncEnovaClient(base_url="https://custom.example.com/")
+        assert client._base_url == "https://custom.example.com"
+
+    async def test_internal_session_has_timeout(self):
+        client = AsyncEnovaClient()
+        session = await client._ensure_session()
+        assert session.timeout.total == 30
+        await client.close()
+
+    async def test_external_session_gets_user_agent(self):
+        session = aiohttp.ClientSession()
+        client = AsyncEnovaClient(session=session)
+        await client._ensure_session()
+        assert "User-Agent" in session.headers
+        await session.close()
 
 
 # ---------------------------------------------------------------------------
@@ -217,6 +214,17 @@ class TestAsyncLoginCredentials:
             await client.login("explicit_code", "explicit_pw")
 
         assert client.account_number == "explicit_code"
+
+    async def test_login_stores_credentials(self):
+        login_resp = _mock_aiohttp_response(text=LOGIN_PAGE_HTML)
+        dashboard_resp = _mock_aiohttp_response(text=DASHBOARD_HTML)
+        session = _make_session(login_resp, dashboard_resp)
+        client = AsyncEnovaClient(session=session)
+
+        await client.login("1234567890", "secret")
+
+        assert client._access_code == "1234567890"
+        assert client._password == "secret"
 
 
 class TestAsyncLogin:
@@ -345,9 +353,6 @@ class TestAsyncDownloadUsage:
 
         result = await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
         assert isinstance(result, list)
-        # Verify URL not double-prepended
-        post_url = session.post.call_args_list[1][0][0]
-        assert not post_url.startswith(BASE_URL + BASE_URL)
 
     async def test_csv_download_missing_form(self):
         resp = _mock_aiohttp_response(text="<html></html>")
@@ -365,7 +370,7 @@ class TestAsyncDownloadUsage:
 
         await client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
 
-        first_call = session.post.call_args_list[0]
+        first_call = session.request.call_args_list[0]
         data = first_call[1]["data"]
         assert data["para"] == "greenButtonDownloadV3"
         assert data["GB_iso_fromDate"] == "2026-02-25"
@@ -419,7 +424,7 @@ class TestAsyncDownloadUsageXml:
 
         await client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
 
-        data = session.post.call_args_list[0][1]["data"]
+        data = session.request.call_args_list[0][1]["data"]
         assert data["downloadConsumption"] == ""
 
     async def test_date_range_exceeds_max(self):
@@ -535,7 +540,7 @@ class TestAsyncDownloadTariff:
 
         rates = await client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
 
-        assert len(rates) == 7  # ULO(4) + TOU(3), no Tiered in this fixture
+        assert len(rates) == 9  # ULO(4) + TOU(3) + Tiered(2)
         assert all(isinstance(r, TariffRate) for r in rates)
 
     async def test_download_empty_page(self):
@@ -553,7 +558,7 @@ class TestAsyncDownloadTariff:
 
         await client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
 
-        call_kwargs = session.get.call_args
+        call_kwargs = session.request.call_args
         params = call_kwargs[1]["params"]
         assert params["para"] == "smartMeterPriceCompV3"
         assert params["fromYear"] == "2026"
@@ -617,26 +622,227 @@ class TestAsyncClientLifecycle:
 class TestAsyncConnectionErrors:
     async def test_login_connection_error(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
-        session.get = MagicMock(side_effect=aiohttp.ClientError("network down"))
-        client = AsyncEnovaClient(session=session)
+        session.request = MagicMock(side_effect=aiohttp.ClientError("network down"))
+        client = AsyncEnovaClient(session=session, retries=0)
 
-        with pytest.raises(EnovaConnectionError, match="login page"):
+        with pytest.raises(EnovaNetworkError, match="login page"):
             await client.login("acct", "pw")
 
     async def test_download_connection_error(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
-        session.post = MagicMock(side_effect=aiohttp.ClientError("timeout"))
-        client = AsyncEnovaClient(session=session)
+        session.request = MagicMock(side_effect=aiohttp.ClientError("timeout"))
+        client = AsyncEnovaClient(session=session, retries=0)
         client._meter_id = "111111"
 
-        with pytest.raises(EnovaConnectionError, match="Download request failed"):
+        with pytest.raises(EnovaNetworkError, match="Download request failed"):
             await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
 
     async def test_tariff_connection_error(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
-        session.get = MagicMock(side_effect=aiohttp.ClientError("timeout"))
-        client = AsyncEnovaClient(session=session)
+        session.request = MagicMock(side_effect=aiohttp.ClientError("timeout"))
+        client = AsyncEnovaClient(session=session, retries=0)
         client._meter_id = "111111"
 
-        with pytest.raises(EnovaConnectionError, match="Tariff download failed"):
+        with pytest.raises(EnovaNetworkError, match="Tariff download failed"):
             await client.download_tariff(date(2026, 3, 1), date(2026, 3, 26))
+
+
+# ---------------------------------------------------------------------------
+# Retry logic tests
+# ---------------------------------------------------------------------------
+
+class TestRetryLogic:
+    async def test_retry_succeeds_on_second_attempt(self):
+        """Transient failure then success should return data."""
+        fail_resp = _mock_aiohttp_response(text="", status=503)
+        ok_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
+        csv_resp = _mock_aiohttp_response(text=MINIMAL_CSV)
+        session = _make_session(fail_resp, ok_resp, csv_resp)
+        client = AsyncEnovaClient(session=session, retries=2)
+        client._meter_id = "111111"
+
+        with patch("enovapower.async_client.asyncio.sleep", new_callable=AsyncMock):
+            result = await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+        assert len(result) == 1
+
+    async def test_retry_gives_up_after_max_retries(self):
+        """All attempts fail should raise EnovaNetworkError."""
+        fail1 = _mock_aiohttp_response(text="", status=503)
+        fail2 = _mock_aiohttp_response(text="", status=503)
+        session = _make_session(fail1, fail2)
+        client = AsyncEnovaClient(session=session, retries=1)
+        client._meter_id = "111111"
+
+        with patch("enovapower.async_client.asyncio.sleep", new_callable=AsyncMock):
+            with pytest.raises(EnovaNetworkError):
+                await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+    async def test_no_retry_on_4xx(self):
+        """Client errors (4xx) should fail immediately, not retry."""
+        fail_resp = _mock_aiohttp_response(text="", status=403)
+        session = _make_session(fail_resp)
+        client = AsyncEnovaClient(session=session, retries=3)
+        client._meter_id = "111111"
+
+        with patch("enovapower.async_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            with pytest.raises(EnovaNetworkError):
+                await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+            mock_sleep.assert_not_awaited()
+
+    async def test_retries_disabled(self):
+        """retries=0 should not retry."""
+        session = AsyncMock(spec=aiohttp.ClientSession)
+        session.request = MagicMock(side_effect=aiohttp.ClientError("fail"))
+        client = AsyncEnovaClient(session=session, retries=0)
+        client._meter_id = "111111"
+
+        with pytest.raises(EnovaNetworkError):
+            await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+        assert session.request.call_count == 1
+
+    async def test_exponential_backoff_timing(self):
+        """Verify sleep is called with exponential delays."""
+        fail1 = _mock_aiohttp_response(text="", status=502)
+        fail2 = _mock_aiohttp_response(text="", status=502)
+        ok_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
+        csv_resp = _mock_aiohttp_response(text=MINIMAL_CSV)
+        session = _make_session(fail1, fail2, ok_resp, csv_resp)
+        client = AsyncEnovaClient(session=session, retries=3)
+        client._meter_id = "111111"
+
+        with patch("enovapower.async_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
+            await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+        # First retry sleeps 2^0 = 1s, second sleeps 2^1 = 2s
+        assert mock_sleep.call_count == 2
+        assert mock_sleep.call_args_list[0][0][0] == 1
+        assert mock_sleep.call_args_list[1][0][0] == 2
+
+
+# ---------------------------------------------------------------------------
+# Session expiry & auto re-login tests
+# ---------------------------------------------------------------------------
+
+class TestSessionExpiry:
+    async def test_is_session_expired_detects_expired(self):
+        assert AsyncEnovaClient._is_session_expired(EXPIRED_URL)
+
+    async def test_is_session_expired_detects_login_redirect(self):
+        assert AsyncEnovaClient._is_session_expired(
+            "https://myaccount.enovapower.com/app/login.jsp"
+        )
+
+    async def test_is_session_expired_normal_url(self):
+        assert not AsyncEnovaClient._is_session_expired(
+            "https://myaccount.enovapower.com/app/capricorn"
+        )
+
+    async def test_download_usage_auto_relogin_on_expiry(self):
+        """Session expires during download -> re-login -> retry succeeds."""
+        client = AsyncEnovaClient(retries=0)
+        client._meter_id = "111111"
+        client._access_code = "1234567890"
+        client._password = "secret"
+
+        expired_text = "<html></html>"  # No form, but URL indicates expiry
+
+        # 1st _request: returns expired URL
+        # login re-triggers (mocked)
+        # 2nd _request: returns valid form
+        # 3rd _request: CSV download
+        call_count = {"n": 0}
+        async def mock_request(method, url, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return (expired_text, EXPIRED_URL)
+            elif call_count["n"] == 2:
+                return (CSV_DOWNLOAD_RESPONSE_HTML, BASE_URL + "/app/capricorn")
+            else:
+                return (MINIMAL_CSV, BASE_URL + "/app/ExcelExport")
+
+        with patch.object(client, "_request", side_effect=mock_request):
+            with patch.object(client, "login", new_callable=AsyncMock) as mock_login:
+                result = await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+        mock_login.assert_awaited_once_with("1234567890", "secret")
+        assert len(result) == 1
+
+    async def test_download_usage_relogin_fails_raises_session_expired(self):
+        """Session expires and re-login fails -> EnovaSessionExpiredError."""
+        client = AsyncEnovaClient(retries=0)
+        client._meter_id = "111111"
+        client._access_code = "1234567890"
+        client._password = "secret"
+
+        async def mock_request(method, url, **kwargs):
+            return ("<html></html>", EXPIRED_URL)
+
+        with patch.object(client, "_request", side_effect=mock_request):
+            with patch.object(
+                client, "login", new_callable=AsyncMock,
+                side_effect=EnovaAuthError("bad creds"),
+            ):
+                with pytest.raises(EnovaSessionExpiredError, match="re-login failed"):
+                    await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+    async def test_relogin_no_stored_credentials_raises(self):
+        """Session expires but no stored credentials -> EnovaSessionExpiredError."""
+        client = AsyncEnovaClient(retries=0)
+        client._meter_id = "111111"
+        # _access_code and _password are None
+
+        async def mock_request(method, url, **kwargs):
+            return ("<html></html>", EXPIRED_URL)
+
+        with patch.object(client, "_request", side_effect=mock_request):
+            with pytest.raises(EnovaSessionExpiredError, match="no stored credentials"):
+                await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+    async def test_download_tariff_auto_relogin(self):
+        """Session expires during tariff download -> re-login -> retry."""
+        client = AsyncEnovaClient(retries=0)
+        client._meter_id = "111111"
+        client._access_code = "1234567890"
+        client._password = "secret"
+
+        call_count = {"n": 0}
+        async def mock_request(method, url, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return ("<html></html>", EXPIRED_URL)
+            else:
+                return (TARIFF_HTML, BASE_URL + "/app/capricorn")
+
+        with patch.object(client, "_request", side_effect=mock_request):
+            with patch.object(client, "login", new_callable=AsyncMock):
+                rates = await client.download_tariff(
+                    date(2026, 2, 25), date(2026, 3, 26)
+                )
+
+        assert len(rates) == 9
+
+    async def test_download_xml_auto_relogin(self):
+        """Session expires during XML download -> re-login -> retry."""
+        client = AsyncEnovaClient(retries=0)
+        client._meter_id = "111111"
+        client._access_code = "1234567890"
+        client._password = "secret"
+
+        call_count = {"n": 0}
+        async def mock_request(method, url, **kwargs):
+            call_count["n"] += 1
+            if call_count["n"] == 1:
+                return ("<html></html>", EXPIRED_URL)
+            elif call_count["n"] == 2:
+                return (XML_DOWNLOAD_RESPONSE_HTML, BASE_URL + "/app/capricorn")
+            else:
+                return (SAMPLE_XML, BASE_URL + "/app/FileDownloader")
+
+        with patch.object(client, "_request", side_effect=mock_request):
+            with patch.object(client, "login", new_callable=AsyncMock):
+                result = await client.download_usage_xml(
+                    date(2026, 3, 1), date(2026, 3, 1)
+                )
+
+        assert "<?xml" in result

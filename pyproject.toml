@@ -1,8 +1,28 @@
+[build-system]
+requires = ["hatchling"]
+build-backend = "hatchling.build"
+
 [project]
 name = "enovapower"
-version = "0.2.0"
+version = "0.3.0"
 description = "Python client for downloading electricity usage data from Enova Power"
+readme = "README.md"
+license = "Apache-2.0"
 requires-python = ">=3.10"
+authors = [
+    { name = "Hani Hawari" },
+]
+classifiers = [
+    "Development Status :: 4 - Beta",
+    "Intended Audience :: Developers",
+    "License :: OSI Approved :: Apache Software License",
+    "Programming Language :: Python :: 3",
+    "Programming Language :: Python :: 3.10",
+    "Programming Language :: Python :: 3.11",
+    "Programming Language :: Python :: 3.12",
+    "Topic :: Home Automation",
+    "Typing :: Typed",
+]
 dependencies = [
     "beautifulsoup4>=4.12",
     "aiohttp>=3.9",
@@ -14,6 +34,14 @@ dev = [
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
 ]
+
+[project.urls]
+Homepage = "https://github.com/hanihawari/enovapower"
+Repository = "https://github.com/hanihawari/enovapower"
+Issues = "https://github.com/hanihawari/enovapower/issues"
+
+[tool.hatch.build.targets.wheel]
+packages = ["enovapower"]
 
 [tool.ruff]
 target-version = "py310"

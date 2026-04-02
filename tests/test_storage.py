@@ -1,5 +1,6 @@
 """Tests for the Enova Power SQLite storage layer."""
 
+import threading
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
@@ -9,26 +10,7 @@ from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv
 from enovapower.storage import UsageStore, _months_ago
 
-MINIMAL_CSV = (
-    '"Reading Date","1 am kWh Usage","2 am kWh Usage","3 am kWh Usage",'
-    '"4 am kWh Usage","5 am kWh Usage","6 am kWh Usage","7 am kWh Usage",'
-    '"8 am kWh Usage","9 am kWh Usage","10 am kWh Usage","11 am kWh Usage",'
-    '"12 pm kWh Usage","1 pm kWh Usage","2 pm kWh Usage","3 pm kWh Usage",'
-    '"4 pm kWh Usage","5 pm kWh Usage","6 pm kWh Usage","7 pm kWh Usage",'
-    '"8 pm kWh Usage","9 pm kWh Usage","10 pm kWh Usage","11 pm kWh Usage",'
-    '"12 pm kWh Usage","[touInquiry_download_Total_TOU_ON_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_MID_Peak_Consumption]",'
-    '"[touInquiry_download_Total_TOU_OFF_Peak_Consumption]"\n'
-    '"2026-03-01","1.00","2.00","3.00","4.00","5.00","6.00","7.00","8.00",'
-    '"9.00","10.00","11.00","12.00","1.00","2.00","3.00","4.00","5.00",'
-    '"6.00","7.00","8.00","9.00","10.00","11.00","12.00","1.50","2.50","3.50"\n'
-)
-
-TWO_ROW_CSV = MINIMAL_CSV.rstrip("\n") + "\n" + (
-    '"2026-03-02","0.50","0.50","0.50","0.50","0.50","0.50","0.50","0.50",'
-    '"0.50","0.50","0.50","0.50","0.50","0.50","0.50","0.50","0.50",'
-    '"0.50","0.50","0.50","0.50","0.50","0.50","0.50","4.00","4.00","4.00"\n'
-)
+from .conftest import MINIMAL_CSV, TWO_ROW_CSV
 
 METER_ID = "111111"
 
@@ -584,3 +566,44 @@ class TestAsyncUpdate:
             await store.async_update(client)
             loaded = store.load(METER_ID)
             assert len(loaded) == 2
+
+
+# ---------------------------------------------------------------------------
+# Thread safety
+# ---------------------------------------------------------------------------
+
+class TestThreadSafety:
+    def test_concurrent_writes_from_multiple_threads(self, tmp_path):
+        db_path = tmp_path / "thread_test.db"
+        store = UsageStore(db_path)
+        errors: list[Exception] = []
+
+        def writer(thread_id: int) -> None:
+            try:
+                for day in range(1, 11):
+                    reading = UsageReading(
+                        date=date(2026, thread_id, day),
+                        hourly={f"h{i:02d}": float(i) for i in range(1, 25)},
+                        total_on_peak=1.0,
+                        total_mid_peak=2.0,
+                        total_off_peak=3.0,
+                        total=6.0,
+                    )
+                    store.save(METER_ID, [reading])
+            except Exception as exc:
+                errors.append(exc)
+
+        threads = [threading.Thread(target=writer, args=(m,)) for m in range(1, 5)]
+        for t in threads:
+            t.start()
+        for t in threads:
+            t.join()
+
+        store.close()
+
+        assert errors == [], f"Thread errors: {errors}"
+
+        # Verify all rows persisted
+        with UsageStore(db_path) as store2:
+            all_readings = store2.load(METER_ID)
+            assert len(all_readings) == 40  # 4 threads * 10 days

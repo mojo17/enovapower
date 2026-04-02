@@ -9,6 +9,7 @@ from datetime import date, datetime
 
 from bs4 import BeautifulSoup
 
+from enovapower.exceptions import EnovaError
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 
 _HEADING_RE = re.compile(
@@ -32,8 +33,14 @@ def parse_csv(raw_csv: str) -> list[UsageReading]:
     Returns:
         List of UsageReading with hourly kWh, TOU totals, and computed total.
     """
+    if not raw_csv or not raw_csv.strip():
+        raise EnovaError("Cannot parse empty CSV data")
+
     reader = csv.reader(io.StringIO(raw_csv))
-    next(reader)  # skip header
+    try:
+        next(reader)  # skip header
+    except StopIteration:
+        raise EnovaError("CSV data has no header row")
 
     rows = []
     for row in reader:
