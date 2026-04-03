@@ -160,7 +160,7 @@ class AsyncEnovaClient:
         2. ``ENOVA_USERNAME`` / ``ENOVA_PASSWORD`` environment variables
 
         Args:
-            access_code: Account number (e.g. "1234567890").
+            access_code: Username (e.g. "user@example.com").
             password: Account password.
 
         Raises:

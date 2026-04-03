@@ -17,7 +17,7 @@ if csv_file.exists():
 # from enovapower import EnovaClient
 #
 # client = EnovaClient()
-# client.login("1234567890", "your_password")
+# client.login("user@example.com", "your_password")
 # readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
 # for r in readings:
 #     print(f"{r.date}: {r.total:.2f} kWh")

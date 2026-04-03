@@ -26,13 +26,13 @@
 
 ## Authentication
 
-The library authenticates against the Enova Power My Account portal using your account number and password — the same credentials you use at [myaccount.enovapower.com](https://myaccount.enovapower.com).
+The library authenticates against the Enova Power My Account portal using your username and password — the same credentials you use at [myaccount.enovapower.com](https://myaccount.enovapower.com).
 
 ```python
 from enovapower import EnovaClient
 
 client = EnovaClient()
-client.login("1234567890", "your_password")
+client.login("user@example.com", "your_password")
 
 # The meter ID and account number are extracted automatically during login
 print(client.meter_id)        # e.g. "111111"
@@ -124,7 +124,7 @@ from enovapower import AsyncEnovaClient
 
 async def main():
     async with AsyncEnovaClient() as client:
-        await client.login("1234567890", "your_password")
+        await client.login("user@example.com", "your_password")
 
         # Download usage data
         readings = await client.download_usage(
@@ -165,7 +165,7 @@ client = AsyncEnovaClient(session=session)
 from enovapower import EnovaClient, UsageStore
 
 client = EnovaClient()
-client.login("1234567890", "your_password")
+client.login("user@example.com", "your_password")
 
 with UsageStore("usage.db") as store:
     store.seed(client)        # backfill last 12 months
@@ -242,7 +242,7 @@ Tariff rates are stored in a separate `tariff` table in the SQLite database:
 from enovapower import EnovaClient, UsageStore
 
 client = EnovaClient()
-client.login("1234567890", "your_password")
+client.login("user@example.com", "your_password")
 
 with UsageStore("usage.db") as store:
     rates = client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))

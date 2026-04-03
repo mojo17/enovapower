@@ -19,7 +19,7 @@ from datetime import date
 from enovapower import AsyncEnovaClient
 
 async with AsyncEnovaClient() as client:
-    await client.login("your_account_number", "your_password")
+    await client.login("user@example.com", "your_password")
     readings = await client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     for r in readings:
         print(f"{r.date}: {r.total:.2f} kWh")
@@ -34,7 +34,7 @@ from datetime import date
 from enovapower import EnovaClient
 
 client = EnovaClient()
-client.login("your_account_number", "your_password")
+client.login("user@example.com", "your_password")
 
 readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
 for r in readings:
@@ -59,12 +59,12 @@ for r in readings:
 from enovapower import EnovaClient, UsageStore
 
 client = EnovaClient()
-client.login("your_account_number", "your_password")
+client.login("user@example.com", "your_password")
 
 with UsageStore("usage.db") as store:
     store.seed(client, months=12)   # initial backfill
     store.update(client)            # incremental update
-    readings = store.load("your_meter_id", from_date, to_date)
+    readings = store.load("111111", from_date, to_date)
 ```
 
 ## Polling interval
