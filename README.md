@@ -52,6 +52,7 @@ for r in readings:
 - Automatic retry with exponential backoff on transient errors
 - Session expiry detection with automatic re-login
 - Configurable `base_url` for custom portal endpoints
+- Built-in logging with customizable logger support
 
 ## Local storage
 
@@ -70,6 +71,50 @@ with UsageStore("usage.db") as store:
 ## Polling interval
 
 The Enova portal is a small utility web UI, not a high-throughput API. Avoid polling more frequently than every 15 minutes. For Home Assistant integrations, a `scan_interval` of 30 minutes or more is recommended.
+
+## Logging
+
+The library uses Python's standard `logging` module. The logger name is `"enovapower"`.
+
+### Basic usage
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+# Now all enovapower logs will appear
+```
+
+### Custom logger
+
+You can inject a custom logger to both clients and storage:
+
+```python
+import logging
+
+my_logger = logging.getLogger("my_app")
+my_logger.setLevel(logging.INFO)
+
+client = AsyncEnovaClient(logger=my_logger)
+store = UsageStore("usage.db", logger=my_logger)
+```
+
+### Using built-in configuration
+
+The library provides a convenience function to set up default handlers:
+
+```python
+from enovapower.logger import configure_logging
+
+# Configure with default format and DEBUG level
+configure_logging(level=logging.DEBUG)
+
+# Or with custom format
+configure_logging(
+    level=logging.INFO,
+    format_string="%(asctime)s - %(levelname)s - %(message)s"
+)
+```
 
 ## Security note
 

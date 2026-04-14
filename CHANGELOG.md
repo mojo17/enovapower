@@ -1,5 +1,20 @@
 # Changelog
 
+## 0.4.0
+
+### Added
+
+- Built-in logging support using Python's standard `logging` module.
+- `logger` parameter on `AsyncEnovaClient` and `UsageStore` for custom logger injection.
+- `get_logger()` function to access the library logger.
+- `configure_logging()` function for easy default configuration.
+- Logging at key operations: login, downloads, session expiry, retries, database operations.
+- Comprehensive test coverage for logging functionality.
+
+### Changed
+
+- `AsyncEnovaClient` and `UsageStore` now use instance-level loggers instead of module-level.
+
 ## 0.3.0 (unreleased)
 
 ### Breaking changes

@@ -10,7 +10,7 @@ from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
 from enovapower.storage import UsageStore
 
-__version__ = "0.3.0"
+__version__ = "0.4.0"
 
 __all__ = [
     "__version__",

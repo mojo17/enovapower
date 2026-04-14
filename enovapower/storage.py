@@ -2,13 +2,17 @@
 
 from __future__ import annotations
 
+import logging
 import sqlite3
 import threading
 from datetime import date, timedelta
 from pathlib import Path
 
+from enovapower.logger import get_logger
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 from enovapower.protocols import AsyncClientProtocol, SyncClientProtocol
+
+log = get_logger()
 
 TOU_COLS = ["total_on_peak", "total_mid_peak", "total_off_peak"]
 DATA_COLS = HOUR_KEYS + TOU_COLS + ["total"]
@@ -67,13 +71,16 @@ class UsageStore:
             readings = store.load("111111")
     """
 
-    def __init__(self, db_path: str | Path = "enova_usage.db") -> None:
+    def __init__(
+        self, db_path: str | Path = "enova_usage.db", logger: logging.Logger | None = None
+    ) -> None:
         self._db_path = str(db_path)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_TARIFF_TABLE)
         self._conn.commit()
+        self._log = logger if logger is not None else get_logger()
 
     def __enter__(self) -> UsageStore:
         return self
@@ -101,6 +108,7 @@ class UsageStore:
         if not readings:
             return 0
 
+        self._log.debug("Saving %d readings for meter %s", len(readings), meter_id)
         rows = []
         for r in readings:
             values = (
@@ -113,6 +121,7 @@ class UsageStore:
         with self._lock:
             self._conn.executemany(_INSERT, rows)
             self._conn.commit()
+        self._log.info("Saved %d readings to database", len(rows))
         return len(rows)
 
     def load(
@@ -152,14 +161,16 @@ class UsageStore:
         readings: list[UsageReading] = []
         for row in rows:
             hourly = {HOUR_KEYS[i]: row[1 + i] for i in range(24)}
-            readings.append(UsageReading(
-                date=date.fromisoformat(row[0]),
-                hourly=hourly,
-                total_on_peak=row[25],
-                total_mid_peak=row[26],
-                total_off_peak=row[27],
-                total=row[28],
-            ))
+            readings.append(
+                UsageReading(
+                    date=date.fromisoformat(row[0]),
+                    hourly=hourly,
+                    total_on_peak=row[25],
+                    total_mid_peak=row[26],
+                    total_off_peak=row[27],
+                    total=row[28],
+                )
+            )
 
         return readings
 
@@ -196,20 +207,24 @@ class UsageStore:
         if not rates:
             return 0
 
+        self._log.debug("Saving %d tariff rates", len(rates))
         rows = []
         for r in rates:
-            rows.append((
-                r.start_date.isoformat(),
-                r.end_date.isoformat(),
-                r.plan,
-                r.name,
-                float(r.price),
-                r.description,
-            ))
+            rows.append(
+                (
+                    r.start_date.isoformat(),
+                    r.end_date.isoformat(),
+                    r.plan,
+                    r.name,
+                    float(r.price),
+                    r.description,
+                )
+            )
 
         with self._lock:
             self._conn.executemany(_INSERT_TARIFF, rows)
             self._conn.commit()
+        self._log.info("Saved %d tariff rates to database", len(rows))
         return len(rows)
 
     def load_tariff(
@@ -226,10 +241,7 @@ class UsageStore:
         Returns:
             List of TariffRate ordered by start_date, plan, name.
         """
-        query = (
-            "SELECT start_date, end_date, plan, name, price, description"
-            " FROM tariff WHERE 1=1"
-        )
+        query = "SELECT start_date, end_date, plan, name, price, description FROM tariff WHERE 1=1"
         params: list = []
 
         if plan is not None:
@@ -277,9 +289,11 @@ class UsageStore:
         to_date = date.today()
         from_date = _months_ago(to_date, months)
 
+        self._log.info("Seeding database with %d months of data", months)
         readings = client.download_usage_chunked(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
+        self._log.info("Seeded %d readings", len(readings))
         return readings
 
     def update(self, client: SyncClientProtocol) -> list[UsageReading]:
@@ -298,17 +312,23 @@ class UsageStore:
         """
         latest = self.latest_record_date(client.meter_id)
         if latest is None:
+            self._log.info("No existing data, falling back to seed()")
             return self.seed(client)
 
         from_date = latest + timedelta(days=1)
         to_date = date.today()
 
         if from_date > to_date:
+            self._log.info("No new data to update")
             return []
 
+        self._log.info(
+            "Updating database from %s to %s", from_date.isoformat(), to_date.isoformat()
+        )
         readings = client.download_usage_chunked(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
+        self._log.info("Updated %d new readings", len(readings))
         return readings
 
     async def async_seed(self, client: AsyncClientProtocol, months: int = 12) -> list[UsageReading]:
@@ -324,9 +344,11 @@ class UsageStore:
         to_date = date.today()
         from_date = _months_ago(to_date, months)
 
+        self._log.info("Async seeding database with %d months of data", months)
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
+        self._log.info("Async seeded %d readings", len(readings))
         return readings
 
     async def async_update(self, client: AsyncClientProtocol) -> list[UsageReading]:
@@ -340,17 +362,23 @@ class UsageStore:
         """
         latest = self.latest_record_date(client.meter_id)
         if latest is None:
+            self._log.info("No existing data, falling back to async_seed()")
             return await self.async_seed(client)
 
         from_date = latest + timedelta(days=1)
         to_date = date.today()
 
         if from_date > to_date:
+            self._log.info("No new data to update")
             return []
 
+        self._log.info(
+            "Async updating database from %s to %s", from_date.isoformat(), to_date.isoformat()
+        )
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
+        self._log.info("Async updated %d new readings", len(readings))
         return readings
 
 

@@ -7,6 +7,7 @@ This is the primary implementation. The synchronous ``EnovaClient`` in
 from __future__ import annotations
 
 import asyncio
+import logging
 import os
 from datetime import date, timedelta
 from typing import Any
@@ -20,8 +21,11 @@ from enovapower.exceptions import (
     EnovaNetworkError,
     EnovaSessionExpiredError,
 )
+from enovapower.logger import get_logger
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
+
+log = get_logger()
 
 _DEFAULT_BASE_URL = "https://myaccount.enovapower.com"
 MAX_RANGE_DAYS = 90
@@ -66,6 +70,7 @@ class AsyncEnovaClient:
         session: aiohttp.ClientSession | None = None,
         retries: int = _DEFAULT_RETRIES,
         base_url: str = _DEFAULT_BASE_URL,
+        logger: logging.Logger | None = None,
     ) -> None:
         self._external_session = session is not None
         self._session = session
@@ -75,6 +80,7 @@ class AsyncEnovaClient:
         self._password: str | None = None
         self._retries = max(retries, 0)
         self._base_url = base_url.rstrip("/")
+        self._log = logger if logger is not None else get_logger()
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -104,13 +110,18 @@ class AsyncEnovaClient:
         Returns:
             A ``(body_text, final_url)`` tuple.
         """
+        self._log.debug("Request: %s %s", method, url)
         session = await self._ensure_session()
         last_err: Exception | None = None
         for attempt in range(self._retries + 1):
             try:
                 async with session.request(method, url, **kwargs) as resp:
+                    self._log.debug("Response: %s %s", resp.status, resp.url)
                     if resp.status in _RETRYABLE_STATUSES:
                         if attempt < self._retries:
+                            self._log.warning(
+                                "Retryable status %s, attempt %d", resp.status, attempt + 1
+                            )
                             await asyncio.sleep(2**attempt)
                             continue
                         resp.raise_for_status()
@@ -118,10 +129,12 @@ class AsyncEnovaClient:
                     text = await resp.text()
                     return text, str(resp.url)
             except aiohttp.ClientResponseError as err:
+                self._log.error("Client response error: %s", err)
                 # Response errors (4xx/5xx) that weren't retried above
                 # are permanent — don't retry, convert and raise now.
                 raise EnovaNetworkError(f"{error_msg}: {err}") from err
             except aiohttp.ClientError as err:
+                self._log.warning("Request error (attempt %d): %s", attempt + 1, err)
                 last_err = err
                 if attempt < self._retries:
                     await asyncio.sleep(2**attempt)
@@ -167,6 +180,7 @@ class AsyncEnovaClient:
             EnovaAuthError: If login fails or credentials are missing.
             EnovaNetworkError: On network failure.
         """
+        self._log.info("Logging in to Enova Power")
         access_code = access_code or os.environ.get("ENOVA_USERNAME")
         password = password or os.environ.get("ENOVA_PASSWORD")
 
@@ -212,6 +226,7 @@ class AsyncEnovaClient:
         soup = BeautifulSoup(text, "html.parser")
         await self._extract_account_info(soup)
         self._account_number = access_code
+        self._log.info("Login successful, meter_id=%s", self._meter_id)
 
     async def _extract_account_info(self, soup: BeautifulSoup) -> None:
         """Extract meter ID from the dashboard page."""
@@ -233,9 +248,7 @@ class AsyncEnovaClient:
                     error_msg="Failed to fetch meter info",
                 )
                 iframe_soup = BeautifulSoup(text, "html.parser")
-                meter_input = iframe_soup.find(
-                    "input", {"name": "selectedMeterId"}
-                )
+                meter_input = iframe_soup.find("input", {"name": "selectedMeterId"})
                 if meter_input:
                     self._meter_id = meter_input["value"]
             except EnovaNetworkError:
@@ -260,9 +273,7 @@ class AsyncEnovaClient:
         try:
             await self.login(self._access_code, self._password)
         except EnovaAuthError as err:
-            raise EnovaSessionExpiredError(
-                f"Session expired and re-login failed: {err}"
-            ) from err
+            raise EnovaSessionExpiredError(f"Session expired and re-login failed: {err}") from err
 
     def _build_form_data(
         self, from_date: date, to_date: date, *, csv_download: bool = True
@@ -322,6 +333,7 @@ class AsyncEnovaClient:
             EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
+        self._log.info("Downloading usage: %s to %s", from_date.isoformat(), to_date.isoformat())
 
         form_data = self._build_form_data(from_date, to_date, csv_download=True)
 
@@ -333,6 +345,7 @@ class AsyncEnovaClient:
         )
 
         if self._is_session_expired(resp_url):
+            self._log.info("Session expired, re-logging in")
             await self._relogin()
             form_data = self._build_form_data(from_date, to_date, csv_download=True)
             text, _ = await self._request(
@@ -346,8 +359,7 @@ class AsyncEnovaClient:
         excel_form = soup.find("form", {"name": "downloadData2Spreadsheet"})
         if not excel_form:
             raise EnovaError(
-                "Could not find spreadsheet download form in response. "
-                "Session may have expired."
+                "Could not find spreadsheet download form in response. Session may have expired."
             )
 
         export_url = excel_form.get("action", "")
@@ -360,7 +372,9 @@ class AsyncEnovaClient:
             error_msg="CSV download failed",
         )
 
-        return parse_csv(csv_text)
+        readings = parse_csv(csv_text)
+        self._log.info("Downloaded %d usage readings", len(readings))
+        return readings
 
     async def download_usage_xml(
         self,
@@ -384,6 +398,9 @@ class AsyncEnovaClient:
             EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
+        self._log.info(
+            "Downloading usage XML: %s to %s", from_date.isoformat(), to_date.isoformat()
+        )
 
         form_data = self._build_form_data(from_date, to_date, csv_download=False)
 
@@ -395,6 +412,7 @@ class AsyncEnovaClient:
         )
 
         if self._is_session_expired(resp_url):
+            self._log.info("Session expired, re-logging in")
             await self._relogin()
             form_data = self._build_form_data(from_date, to_date, csv_download=False)
             text, _ = await self._request(
@@ -419,6 +437,7 @@ class AsyncEnovaClient:
             error_msg="XML download failed",
         )
 
+        self._log.info("Downloaded XML (%d bytes)", len(xml_text))
         return xml_text
 
     async def download_usage_chunked(
@@ -477,6 +496,8 @@ class AsyncEnovaClient:
         if not self._meter_id:
             raise EnovaError("Not logged in or meter ID not found. Call login() first.")
 
+        self._log.info("Downloading tariff: %s to %s", from_date.isoformat(), to_date.isoformat())
+
         tariff_params = {
             "para": "smartMeterPriceCompV3",
             "inquiryType": "hydro",
@@ -496,6 +517,7 @@ class AsyncEnovaClient:
         )
 
         if self._is_session_expired(resp_url):
+            self._log.info("Session expired, re-logging in")
             await self._relogin()
             text, _ = await self._request(
                 "GET",
@@ -504,7 +526,9 @@ class AsyncEnovaClient:
                 error_msg="Tariff download failed after re-login",
             )
 
-        return parse_tariff_html(text)
+        rates = parse_tariff_html(text)
+        self._log.info("Downloaded %d tariff rates", len(rates))
+        return rates
 
     async def get_latest_usage(self) -> UsageReading | None:
         """Download the most recent usage reading.

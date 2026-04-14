@@ -20,6 +20,7 @@
   - [Querying Tariffs](#querying-tariffs)
 - [Data Models](#data-models)
 - [Error Handling](#error-handling)
+- [Logging](#logging)
 - [Limitations](#limitations)
 
 ---
@@ -322,6 +323,71 @@ except EnovaError as e:
 | `EnovaError` | Date range exceeds 90 days, from > to, not logged in, or download form not found in response |
 
 All exceptions inherit from `EnovaError`, so catching `EnovaError` handles all cases.
+
+---
+
+## Logging
+
+The library uses Python's standard `logging` module. The logger name is `"enovapower"`.
+
+### Basic usage
+
+```python
+import logging
+
+logging.basicConfig(level=logging.DEBUG)
+```
+
+Now all enovapower logs will appear with the default format:
+```
+2026-04-14 12:30:00 [enovapower] INFO: Logging in to Enova Power
+2026-04-14 12:30:01 [enovapower] INFO: Login successful, meter_id=123456
+2026-04-14 12:30:02 [enovapower] INFO: Downloading usage: 2026-02-25 to 2026-03-26
+```
+
+### Custom logger
+
+You can inject a custom logger to both clients and storage:
+
+```python
+import logging
+from enovapower import AsyncEnovaClient, UsageStore
+
+my_logger = logging.getLogger("my_app")
+my_logger.setLevel(logging.INFO)
+
+client = AsyncEnovaClient(logger=my_logger)
+store = UsageStore("usage.db", logger=my_logger)
+```
+
+### Built-in configuration
+
+The library provides a convenience function to set up default handlers:
+
+```python
+from enovapower.logger import configure_logging, get_logger
+
+# Configure with default format and DEBUG level
+configure_logging(level=logging.DEBUG)
+
+# Or with custom format
+configure_logging(
+    level=logging.INFO,
+    format_string="%(asctime)s - %(levelname)s - %(message)s"
+)
+
+# Get the logger directly if you configured it elsewhere
+logger = get_logger()
+```
+
+### Log levels
+
+| Level | Usage |
+|-------|-------|
+| `DEBUG` | HTTP requests/responses, detailed parsing |
+| `INFO` | Login, downloads, session expiry, database operations |
+| `WARNING` | Retry attempts, missing data |
+| `ERROR` | Failed requests, parsing failures |
 
 ---
 
