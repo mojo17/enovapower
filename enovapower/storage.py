@@ -2,6 +2,7 @@
 
 from __future__ import annotations
 
+import asyncio
 import logging
 import sqlite3
 import threading
@@ -91,7 +92,9 @@ class UsageStore:
     def close(self) -> None:
         """Close the database connection."""
         with self._lock:
-            self._conn.close()
+            if self._conn:
+                self._conn.close()
+                self._conn = None  # type: ignore[assignment]
 
     def save(self, meter_id: str, readings: list[UsageReading]) -> int:
         """Save usage readings to the database.
@@ -158,6 +161,8 @@ class UsageStore:
             cursor = self._conn.execute(query, params)
             rows = cursor.fetchall()
 
+        col_index = {col: i + 1 for i, col in enumerate(DATA_COLS)}
+
         readings: list[UsageReading] = []
         for row in rows:
             hourly = {HOUR_KEYS[i]: row[1 + i] for i in range(24)}
@@ -165,10 +170,10 @@ class UsageStore:
                 UsageReading(
                     date=date.fromisoformat(row[0]),
                     hourly=hourly,
-                    total_on_peak=row[25],
-                    total_mid_peak=row[26],
-                    total_off_peak=row[27],
-                    total=row[28],
+                    total_on_peak=row[col_index["total_on_peak"]],
+                    total_mid_peak=row[col_index["total_mid_peak"]],
+                    total_off_peak=row[col_index["total_off_peak"]],
+                    total=row[col_index["total"]],
                 )
             )
 
@@ -347,7 +352,8 @@ class UsageStore:
         self._log.info("Async seeding database with %d months of data", months)
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
-            self.save(client.meter_id, readings)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.save, client.meter_id, readings)
         self._log.info("Async seeded %d readings", len(readings))
         return readings
 
@@ -377,7 +383,8 @@ class UsageStore:
         )
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
-            self.save(client.meter_id, readings)
+            loop = asyncio.get_event_loop()
+            await loop.run_in_executor(None, self.save, client.meter_id, readings)
         self._log.info("Async updated %d new readings", len(readings))
         return readings
 

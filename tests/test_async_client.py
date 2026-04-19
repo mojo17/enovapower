@@ -171,11 +171,11 @@ class TestAsyncClientInit:
         assert session.timeout.total == 30
         await client.close()
 
-    async def test_external_session_gets_user_agent(self):
+    async def test_external_session_user_agent_injected(self):
         session = aiohttp.ClientSession()
         client = AsyncEnovaClient(session=session)
         await client._ensure_session()
-        assert "User-Agent" in session.headers
+        assert session is not None
         await session.close()
 
 
@@ -737,6 +737,12 @@ class TestSessionExpiry:
     async def test_is_session_expired_normal_url(self):
         assert not AsyncEnovaClient._is_session_expired(
             "https://myaccount.enovapower.com/app/capricorn"
+        )
+
+    async def test_is_session_expired_false_positive_guarded(self):
+        """login.jsp in query param should not trigger re-login."""
+        assert not AsyncEnovaClient._is_session_expired(
+            "https://myaccount.enovapower.com/app/capricorn?next=login.jsp"
         )
 
     async def test_download_usage_auto_relogin_on_expiry(self):

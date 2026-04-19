@@ -11,7 +11,7 @@ import logging
 import os
 from datetime import date, timedelta
 from typing import Any
-from urllib.parse import urljoin, urlparse
+from urllib.parse import parse_qs, urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -126,13 +126,8 @@ class AsyncEnovaClient:
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession(
-                headers={"User-Agent": _USER_AGENT},
                 timeout=_DEFAULT_TIMEOUT,
             )
-        elif self._external_session:
-            # Merge User-Agent into external sessions to avoid 403s from the portal.
-            if "User-Agent" not in self._session.headers:
-                self._session.headers["User-Agent"] = _USER_AGENT
         return self._session
 
     async def _request(
@@ -153,10 +148,14 @@ class AsyncEnovaClient:
         """
         self._log.debug("Request: %s %s", method, url)
         session = await self._ensure_session()
+
+        headers = kwargs.pop("headers", {})
+        headers.setdefault("User-Agent", _USER_AGENT)
+
         last_err: Exception | None = None
         for attempt in range(self._retries + 1):
             try:
-                async with session.request(method, url, **kwargs) as resp:
+                async with session.request(method, url, headers=headers, **kwargs) as resp:
                     self._log.debug("Response: %s %s", resp.status, resp.url)
                     if resp.status in _RETRYABLE_STATUSES:
                         if attempt < self._retries:
@@ -245,11 +244,15 @@ class AsyncEnovaClient:
         if not csrf_token:
             raise EnovaAuthError("Could not find CSRF token on login page")
 
+        token_value = csrf_token.get("value")
+        if not token_value:
+            raise EnovaAuthError("CSRF token input has no value attribute")
+
         login_data = {
             "para": "index",
             "accessCode": access_code,
             "password": password,
-            "jspCSRFToken": csrf_token["value"],
+            "jspCSRFToken": token_value,
             "nextPara": "",
         }
 
@@ -272,9 +275,14 @@ class AsyncEnovaClient:
     async def _extract_account_info(self, soup: BeautifulSoup) -> None:
         """Extract meter ID from the dashboard page."""
         refresh_link = soup.find("a", id="refresh_btn")
-        if refresh_link and "inMeterID=" in refresh_link.get("href", ""):
-            href = refresh_link["href"]
-            self._meter_id = href.split("inMeterID=")[-1]
+        if refresh_link:
+            href = refresh_link.get("href", "")
+            if "inMeterID=" in href:
+                parsed = urlparse(href)
+                qs = parse_qs(parsed.query)
+                meter_ids = qs.get("inMeterID", [])
+                if meter_ids:
+                    self._meter_id = meter_ids[0]
 
         if not self._meter_id:
             try:
@@ -291,14 +299,20 @@ class AsyncEnovaClient:
                 iframe_soup = BeautifulSoup(text, "html.parser")
                 meter_input = iframe_soup.find("input", {"name": "selectedMeterId"})
                 if meter_input:
-                    self._meter_id = meter_input["value"]
+                    self._meter_id = meter_input.get("value")
             except EnovaNetworkError:
                 pass
 
     @staticmethod
     def _is_session_expired(url: str) -> bool:
         """Return True if the response URL indicates a session expiry."""
-        return "sessionExpired" in url or "login.jsp" in url
+        parsed = urlparse(url)
+        query_params = parse_qs(parsed.query)
+        return (
+            "sessionExpired" in query_params
+            or "sessionExpired" in parsed.path
+            or parsed.path.endswith("login.jsp")
+        )
 
     async def _relogin(self) -> None:
         """Re-login using stored credentials.
@@ -315,6 +329,27 @@ class AsyncEnovaClient:
             await self.login(self._access_code, self._password)
         except EnovaAuthError as err:
             raise EnovaSessionExpiredError(f"Session expired and re-login failed: {err}") from err
+
+    async def _request_with_relogin(
+        self,
+        method: str,
+        url: str,
+        *,
+        error_msg: str = "Request failed",
+        rebuild_params: dict | None = None,
+        **kwargs: Any,
+    ) -> tuple[str, str]:
+        """Execute request with automatic re-login on session expiry."""
+        text, resp_url = await self._request(method, url, error_msg=error_msg, **kwargs)
+        if self._is_session_expired(resp_url):
+            self._log.info("Session expired, re-logging in")
+            await self._relogin()
+            if rebuild_params:
+                kwargs = {**kwargs, **rebuild_params}
+            text, resp_url = await self._request(
+                method, url, error_msg=f"{error_msg} after re-login", **kwargs
+            )
+        return text, resp_url
 
     def _build_form_data(
         self, from_date: date, to_date: date, *, csv_download: bool = True
@@ -378,23 +413,13 @@ class AsyncEnovaClient:
 
         form_data = self._build_form_data(from_date, to_date, csv_download=True)
 
-        text, resp_url = await self._request(
+        text, resp_url = await self._request_with_relogin(
             "POST",
             f"{self._base_url}/app/capricorn",
             data=form_data,
+            rebuild_params={"data": form_data},
             error_msg="Download request failed",
         )
-
-        if self._is_session_expired(resp_url):
-            self._log.info("Session expired, re-logging in")
-            await self._relogin()
-            form_data = self._build_form_data(from_date, to_date, csv_download=True)
-            text, _ = await self._request(
-                "POST",
-                f"{self._base_url}/app/capricorn",
-                data=form_data,
-                error_msg="Download request failed after re-login",
-            )
 
         soup = BeautifulSoup(text, "html.parser")
         excel_form = soup.find("form", {"name": "downloadData2Spreadsheet"})
@@ -442,25 +467,14 @@ class AsyncEnovaClient:
             "Downloading usage XML: %s to %s", from_date.isoformat(), to_date.isoformat()
         )
 
-        form_data = self._build_form_data(from_date, to_date, csv_download=False)
-
-        text, resp_url = await self._request(
+        form_data_xml = self._build_form_data(from_date, to_date, csv_download=False)
+        text, resp_url = await self._request_with_relogin(
             "POST",
             f"{self._base_url}/app/capricorn",
-            data=form_data,
+            data=form_data_xml,
+            rebuild_params={"data": form_data_xml},
             error_msg="Download request failed",
         )
-
-        if self._is_session_expired(resp_url):
-            self._log.info("Session expired, re-logging in")
-            await self._relogin()
-            form_data = self._build_form_data(from_date, to_date, csv_download=False)
-            text, _ = await self._request(
-                "POST",
-                f"{self._base_url}/app/capricorn",
-                data=form_data,
-                error_msg="Download request failed after re-login",
-            )
 
         soup = BeautifulSoup(text, "html.parser")
         xml_form = soup.find("form", {"name": "downloadXml"})
@@ -528,12 +542,7 @@ class AsyncEnovaClient:
             EnovaSessionExpiredError: If session expired and re-login failed.
             EnovaNetworkError: On network failure.
         """
-        if (to_date - from_date).days > MAX_RANGE_DAYS:
-            raise EnovaError(f"Date range cannot exceed {MAX_RANGE_DAYS} days.")
-        if to_date < from_date:
-            raise EnovaError("from_date must be before to_date")
-        if not self._meter_id:
-            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
+        self._validate_download_params(from_date, to_date)
 
         self._log.info("Downloading tariff: %s to %s", from_date.isoformat(), to_date.isoformat())
 
@@ -548,22 +557,13 @@ class AsyncEnovaClient:
             "toDay": f"{to_date.day:02d}",
         }
 
-        text, resp_url = await self._request(
+        text, resp_url = await self._request_with_relogin(
             "GET",
             f"{self._base_url}/app/capricorn",
             params=tariff_params,
+            rebuild_params={"params": tariff_params},
             error_msg="Tariff download failed",
         )
-
-        if self._is_session_expired(resp_url):
-            self._log.info("Session expired, re-logging in")
-            await self._relogin()
-            text, _ = await self._request(
-                "GET",
-                f"{self._base_url}/app/capricorn",
-                params=tariff_params,
-                error_msg="Tariff download failed after re-login",
-            )
 
         rates = parse_tariff_html(text)
         self._log.info("Downloaded %d tariff rates", len(rates))

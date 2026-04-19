@@ -22,6 +22,17 @@ _PLAN_NAMES = {
     "Tiered Price Plan": "Tiered",
 }
 
+_HOUR_OFFSET = 1
+_TOU_OFFSET = _HOUR_OFFSET + len(HOUR_KEYS)
+
+
+def _parse_float(value: str, field_name: str = "value") -> float:
+    """Parse a string as float, raising EnovaError on invalid input."""
+    try:
+        return float(value) if value else 0.0
+    except ValueError:
+        raise EnovaError(f"Invalid {field_name}: {value!r}") from None
+
 
 def parse_csv(raw_csv: str) -> list[UsageReading]:
     """Parse the Enova CSV export into a list of UsageReading objects.
@@ -66,12 +77,13 @@ def parse_csv(raw_csv: str) -> list[UsageReading]:
         hourly: dict[str, float] = {}
         for i, key in enumerate(HOUR_KEYS):
             val = padded[i + 1].strip().strip('"')
-            hourly[key] = float(val) if val else 0.0
+            hourly[key] = _parse_float(val, f"hourly value at {key}")
 
         tou_values = []
-        for i in range(len(tou_cols)):
-            val = padded[25 + i].strip().strip('"') if len(padded) > 25 + i else ""
-            tou_values.append(float(val) if val else 0.0)
+        for i, col in enumerate(tou_cols):
+            idx = _TOU_OFFSET + i
+            val = padded[idx].strip().strip('"') if len(padded) > idx else ""
+            tou_values.append(_parse_float(val, f"TOU value at {col}"))
 
         readings.append(UsageReading(
             date=date.fromisoformat(date_str),
@@ -116,7 +128,7 @@ def parse_tariff_html(html: str) -> list[TariffRate]:
                 continue
 
             name = cells[0]
-            price = float(cells[1])
+            price = _parse_float(cells[1], "price")
 
             if plan == "Tiered" and len(cells) >= 4:
                 description = f"{cells[2]} - {cells[3]} kWh"

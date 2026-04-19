@@ -13,7 +13,9 @@ from __future__ import annotations
 
 import asyncio
 import threading
+from collections.abc import Coroutine
 from datetime import date
+from typing import Any, TypeVar
 
 from enovapower.exceptions import (
     EnovaAuthError,
@@ -23,6 +25,8 @@ from enovapower.exceptions import (
 )
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
+
+T = TypeVar("T")
 
 # Re-exports for backward compatibility
 __all__ = [
@@ -67,7 +71,13 @@ class EnovaClient:
         )
         self._thread.start()
 
-    def _run(self, coro):  # noqa: ANN001, ANN202
+    def __enter__(self) -> "EnovaClient":
+        return self
+
+    def __exit__(self, *exc: object) -> None:
+        self.close()
+
+    def _run(self, coro: Coroutine[Any, Any, T]) -> T:
         """Submit a coroutine to the background loop and block for its result."""
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
