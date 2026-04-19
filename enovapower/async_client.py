@@ -9,6 +9,7 @@ from __future__ import annotations
 import asyncio
 import logging
 import os
+import random
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -43,6 +44,11 @@ _USER_AGENT = (
 
 # HTTP status codes that warrant a retry.
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+
+def _jitter() -> float:
+    """Return random jitter for exponential backoff."""
+    return random.uniform(0, 1)
 
 
 class AsyncEnovaClient:
@@ -162,7 +168,7 @@ class AsyncEnovaClient:
                             self._log.warning(
                                 "Retryable status %s, attempt %d", resp.status, attempt + 1
                             )
-                            await asyncio.sleep(2**attempt)
+                            await asyncio.sleep(2**attempt + _jitter())
                             continue
                         resp.raise_for_status()
                     resp.raise_for_status()
@@ -177,7 +183,7 @@ class AsyncEnovaClient:
                 self._log.warning("Request error (attempt %d): %s", attempt + 1, err)
                 last_err = err
                 if attempt < self._retries:
-                    await asyncio.sleep(2**attempt)
+                    await asyncio.sleep(2**attempt + _jitter())
                     continue
         raise EnovaNetworkError(f"{error_msg}: {last_err}") from last_err
 
@@ -264,7 +270,7 @@ class AsyncEnovaClient:
             error_msg="Login request failed",
         )
 
-        if "sessionExpired" in final_url or "login.jsp" in final_url:
+        if self._is_session_expired(final_url):
             raise EnovaAuthError("Login failed — check access code and password")
 
         soup = BeautifulSoup(text, "html.parser")
@@ -336,7 +342,6 @@ class AsyncEnovaClient:
         url: str,
         *,
         error_msg: str = "Request failed",
-        rebuild_params: dict | None = None,
         **kwargs: Any,
     ) -> tuple[str, str]:
         """Execute request with automatic re-login on session expiry."""
@@ -344,8 +349,6 @@ class AsyncEnovaClient:
         if self._is_session_expired(resp_url):
             self._log.info("Session expired, re-logging in")
             await self._relogin()
-            if rebuild_params:
-                kwargs = {**kwargs, **rebuild_params}
             text, resp_url = await self._request(
                 method, url, error_msg=f"{error_msg} after re-login", **kwargs
             )
@@ -417,7 +420,6 @@ class AsyncEnovaClient:
             "POST",
             f"{self._base_url}/app/capricorn",
             data=form_data,
-            rebuild_params={"data": form_data},
             error_msg="Download request failed",
         )
 
@@ -472,7 +474,6 @@ class AsyncEnovaClient:
             "POST",
             f"{self._base_url}/app/capricorn",
             data=form_data_xml,
-            rebuild_params={"data": form_data_xml},
             error_msg="Download request failed",
         )
 
@@ -518,6 +519,8 @@ class AsyncEnovaClient:
                     all_readings.append(reading)
                     seen_dates.add(reading.date)
             current = chunk_end + timedelta(days=1)
+            if current <= to_date:
+                await asyncio.sleep(1)
 
         return all_readings
 
@@ -561,7 +564,6 @@ class AsyncEnovaClient:
             "GET",
             f"{self._base_url}/app/capricorn",
             params=tariff_params,
-            rebuild_params={"params": tariff_params},
             error_msg="Tariff download failed",
         )
 

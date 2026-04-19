@@ -703,7 +703,7 @@ class TestRetryLogic:
         assert session.request.call_count == 1
 
     async def test_exponential_backoff_timing(self):
-        """Verify sleep is called with exponential delays."""
+        """Verify sleep is called with exponential delays including jitter."""
         fail1 = _mock_aiohttp_response(text="", status=502)
         fail2 = _mock_aiohttp_response(text="", status=502)
         ok_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
@@ -713,9 +713,10 @@ class TestRetryLogic:
         client._meter_id = "111111"
 
         with patch("enovapower.async_client.asyncio.sleep", new_callable=AsyncMock) as mock_sleep:
-            await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+            with patch("enovapower.async_client._jitter", return_value=0):
+                await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
 
-        # First retry sleeps 2^0 = 1s, second sleeps 2^1 = 2s
+        # First retry sleeps 2^0 + jitter = 1s, second sleeps 2^1 + jitter = 2s
         assert mock_sleep.call_count == 2
         assert mock_sleep.call_args_list[0][0][0] == 1
         assert mock_sleep.call_args_list[1][0][0] == 2

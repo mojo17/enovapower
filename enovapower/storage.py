@@ -352,7 +352,7 @@ class UsageStore:
         self._log.info("Async seeding database with %d months of data", months)
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
-            loop = asyncio.get_event_loop()
+            loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.save, client.meter_id, readings)
         self._log.info("Async seeded %d readings", len(readings))
         return readings
@@ -366,7 +366,8 @@ class UsageStore:
         Returns:
             List of newly downloaded readings (may be empty).
         """
-        latest = self.latest_record_date(client.meter_id)
+        loop = asyncio.get_running_loop()
+        latest = await loop.run_in_executor(None, self.latest_record_date, client.meter_id)
         if latest is None:
             self._log.info("No existing data, falling back to async_seed()")
             return await self.async_seed(client)
@@ -383,7 +384,6 @@ class UsageStore:
         )
         readings = await client.download_usage_chunked(from_date, to_date)
         if readings:
-            loop = asyncio.get_event_loop()
             await loop.run_in_executor(None, self.save, client.meter_id, readings)
         self._log.info("Async updated %d new readings", len(readings))
         return readings
