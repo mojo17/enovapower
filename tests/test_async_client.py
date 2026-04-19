@@ -1,6 +1,7 @@
 """Tests for the async Enova Power client (primary implementation)."""
 
 import os
+import pickle
 from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, patch
 
@@ -846,3 +847,77 @@ class TestSessionExpiry:
                 )
 
         assert "<?xml" in result
+
+
+# ---------------------------------------------------------------------------
+# Security feature tests
+# ---------------------------------------------------------------------------
+
+
+class TestSecurityValidations:
+    def test_base_url_requires_scheme(self):
+        with pytest.raises(EnovaError, match="scheme"):
+            AsyncEnovaClient(base_url="myaccount.enovapower.com")
+
+    def test_base_url_rejects_fragment(self):
+        with pytest.raises(EnovaError, match="fragment"):
+            AsyncEnovaClient(base_url="https://myaccount.enovapower.com#anchor")
+
+    def test_base_url_rejects_query(self):
+        with pytest.raises(EnovaError, match="query"):
+            AsyncEnovaClient(base_url="https://myaccount.enovapower.com?foo=bar")
+
+    def test_base_url_accepts_https(self):
+        client = AsyncEnovaClient(base_url="https://myaccount.enovapower.com")
+        assert client._base_url == "https://myaccount.enovapower.com"
+
+    def test_validate_url_rejects_external_host(self):
+        client = AsyncEnovaClient()
+        with pytest.raises(EnovaError, match="host not allowed"):
+            client._validate_url("https://evil.com/steal")
+
+    def test_validate_url_rejects_invalid_scheme(self):
+        client = AsyncEnovaClient()
+        with pytest.raises(EnovaError, match="scheme"):
+            client._validate_url("javascript:alert(1)")
+
+    def test_validate_url_accepts_relative_path(self):
+        client = AsyncEnovaClient()
+        url = client._validate_url("/app/capricorn")
+        assert url == "/app/capricorn"
+
+    def test_validate_url_accepts_absolute_path(self):
+        client = AsyncEnovaClient()
+        url = client._validate_url("/app/capricorn")
+        assert url.startswith("/app")
+
+
+class TestPickleSafety:
+    def test_pickle_excludes_credentials(self):
+        client = AsyncEnovaClient()
+        client._access_code = "test_user"
+        client._password = "test_pass"
+        client._meter_id = "12345"
+
+        pickled = pickle.dumps(client)
+        restored = pickle.loads(pickled)
+
+        assert restored._access_code is None
+        assert restored._password is None
+        assert restored._meter_id == "12345"
+
+    def test_setstate_restores_logger(self):
+        client = AsyncEnovaClient()
+        pickled = pickle.dumps(client)
+        restored = pickle.loads(pickled)
+        assert restored._log is not None
+
+
+class TestClearCredentials:
+    def test_clear_credentials_nones_out(self):
+        client = AsyncEnovaClient()
+        client._access_code = "user"
+        client._password = "pass"
+        client.clear_credentials()
+        assert client._access_code is None
+        assert client._password is None

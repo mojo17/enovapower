@@ -11,6 +11,7 @@ import logging
 import os
 from datetime import date, timedelta
 from typing import Any
+from urllib.parse import urljoin, urlparse
 
 import aiohttp
 from bs4 import BeautifulSoup
@@ -79,8 +80,48 @@ class AsyncEnovaClient:
         self._access_code: str | None = None
         self._password: str | None = None
         self._retries = max(retries, 0)
-        self._base_url = base_url.rstrip("/")
+        self._base_url = self._validate_base_url(base_url)
         self._log = logger if logger is not None else get_logger()
+
+    def _validate_base_url(self, url: str) -> str:
+        """Validate and normalize base_url to prevent SSRF."""
+        parsed = urlparse(url)
+        if parsed.scheme not in ("http", "https"):
+            raise EnovaError("base_url must use http or https scheme")
+        if parsed.fragment or parsed.query or parsed.params:
+            raise EnovaError("base_url must not contain fragment, query, or params")
+        return url.rstrip("/")
+
+    def _validate_url(self, url: str) -> str:
+        """Validate URL stays within allowed domain to prevent open redirect."""
+        parsed = urlparse(url)
+        base_parsed = urlparse(self._base_url)
+
+        if parsed.scheme and parsed.scheme not in ("http", "https"):
+            raise EnovaError(f"Invalid URL scheme: {parsed.scheme}")
+
+        if parsed.netloc and parsed.netloc != base_parsed.netloc:
+            raise EnovaError(f"URL host not allowed: {parsed.netloc}")
+
+        return url
+
+    def __getstate__(self) -> dict:
+        """Exclude credentials from pickling."""
+        state = self.__dict__.copy()
+        state["_access_code"] = None
+        state["_password"] = None
+        return state
+
+    def __setstate__(self, state: dict) -> None:
+        """Restore state, requiring re-login."""
+        self.__dict__.update(state)
+        self._log = get_logger()
+
+    def clear_credentials(self) -> None:
+        """Clear stored credentials from memory."""
+        self._access_code = None
+        self._password = None
+        self._log.debug("Credentials cleared from memory")
 
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
@@ -363,8 +404,7 @@ class AsyncEnovaClient:
             )
 
         export_url = excel_form.get("action", "")
-        if not export_url.startswith("http"):
-            export_url = self._base_url + export_url
+        export_url = self._validate_url(urljoin(self._base_url, export_url))
 
         csv_text, _ = await self._request(
             "POST",
@@ -428,8 +468,7 @@ class AsyncEnovaClient:
             raise EnovaError("Could not find XML download form in response")
 
         xml_url = xml_form.get("action", "")
-        if not xml_url.startswith("http"):
-            xml_url = self._base_url + xml_url
+        xml_url = self._validate_url(urljoin(self._base_url, xml_url))
 
         xml_text, _ = await self._request(
             "POST",
