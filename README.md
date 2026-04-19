@@ -5,7 +5,14 @@ A Python library for downloading electricity usage data from the [Enova Power](h
 Enova Power serves residential and commercial customers in the Kitchener-Waterloo region of Ontario, Canada. Their My Account portal provides smart meter data exports, but only through a web UI. This library automates that process so you can pull your usage data into scripts, notebooks, dashboards, or Home Assistant.
 
 ## Quick start
+### Install the library
 
+Using [uv](https://docs.astral.sh/uv/) (recommended):
+```
+uv add enovapower
+```
+
+Using pip:
 ```bash
 pip install enovapower
 ```

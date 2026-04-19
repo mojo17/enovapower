@@ -2,10 +2,16 @@
 
 ## Setup
 
+Using [uv](https://docs.astral.sh/uv/) (recommended):
+```bash
+uv sync --extra dev
+make install-hooks
+```
+
+Using pip:
 ```bash
 python3 -m venv .venv
 source .venv/bin/activate
-pip install -r requirements.txt
 pip install -e ".[dev]"
 make install-hooks
 ```

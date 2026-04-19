@@ -32,7 +32,7 @@ log = get_logger()
 _DEFAULT_BASE_URL = "https://myaccount.enovapower.com"
 MAX_RANGE_DAYS = 90
 _DEFAULT_RETRIES = 3
-_DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30)
+_DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
 # The portal blocks requests with non-browser User-Agent headers, so we
 # present as a standard browser to avoid 403 or empty responses.
@@ -316,7 +316,7 @@ class AsyncEnovaClient:
         query_params = parse_qs(parsed.query)
         return (
             "sessionExpired" in query_params
-            or "sessionExpired" in parsed.path
+            or "sessionExpired" in parsed.path  # e.g. sessionExpired.jsp
             or parsed.path.endswith("login.jsp")
         )
 

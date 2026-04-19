@@ -17,6 +17,7 @@ log = get_logger()
 
 TOU_COLS = ["total_on_peak", "total_mid_peak", "total_off_peak"]
 DATA_COLS = HOUR_KEYS + TOU_COLS + ["total"]
+_COL_INDEX = {col: i + 1 for i, col in enumerate(DATA_COLS)}
 
 _CREATE_TABLE = """
 CREATE TABLE IF NOT EXISTS usage (
@@ -161,8 +162,6 @@ class UsageStore:
             cursor = self._conn.execute(query, params)
             rows = cursor.fetchall()
 
-        col_index = {col: i + 1 for i, col in enumerate(DATA_COLS)}
-
         readings: list[UsageReading] = []
         for row in rows:
             hourly = {HOUR_KEYS[i]: row[1 + i] for i in range(24)}
@@ -170,10 +169,10 @@ class UsageStore:
                 UsageReading(
                     date=date.fromisoformat(row[0]),
                     hourly=hourly,
-                    total_on_peak=row[col_index["total_on_peak"]],
-                    total_mid_peak=row[col_index["total_mid_peak"]],
-                    total_off_peak=row[col_index["total_off_peak"]],
-                    total=row[col_index["total"]],
+                    total_on_peak=row[_COL_INDEX["total_on_peak"]],
+                    total_mid_peak=row[_COL_INDEX["total_mid_peak"]],
+                    total_off_peak=row[_COL_INDEX["total_off_peak"]],
+                    total=row[_COL_INDEX["total"]],
                 )
             )
 
