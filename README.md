@@ -36,7 +36,7 @@ from datetime import date
 from enovapower import AsyncEnovaClient
 
 async with AsyncEnovaClient() as client:
-    await client.login("user@example.com", "your_password"). # Skip passing credentials if set via environment variables
+    await client.login("user@example.com", "your_password")  # Do not pass credentials if they are set via environment variables
     readings = await client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     for r in readings:
         print(f"{r.date}: {r.total:.2f} kWh")
