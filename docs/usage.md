@@ -333,7 +333,12 @@ except EnovaAuthError as e:
     print(f"Login failed: {e}")
 
 try:
-    client.download_usage_xml(date(2026, 1, 1), date(2026, 7, 1))
+    client.download_usage(date(2026, 3, 26), date(2026, 2, 25))  # from_date > to_date
+except EnovaError as e:
+    print(f"Download failed: {e}")
+
+try:
+    client.download_usage_xml(date(2026, 1, 1), date(2026, 7, 1))  # exceeds 90 days
 except EnovaError as e:
     print(f"Download failed: {e}")
 ```
