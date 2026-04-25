@@ -77,6 +77,8 @@ class AsyncEnovaClient:
         session: aiohttp.ClientSession | None = None,
         retries: int = _DEFAULT_RETRIES,
         base_url: str = _DEFAULT_BASE_URL,
+        allow_insecure_http: bool = False,
+        clear_credentials_on_close: bool = True,
         logger: logging.Logger | None = None,
     ) -> None:
         self._external_session = session is not None
@@ -86,6 +88,8 @@ class AsyncEnovaClient:
         self._access_code: str | None = None
         self._password: str | None = None
         self._retries = max(retries, 0)
+        self._allow_insecure_http = allow_insecure_http
+        self._clear_credentials_on_close = clear_credentials_on_close
         self._base_url = self._validate_base_url(base_url)
         self._log = logger if logger is not None else get_logger()
 
@@ -94,6 +98,8 @@ class AsyncEnovaClient:
         parsed = urlparse(url)
         if parsed.scheme not in ("http", "https"):
             raise EnovaError("base_url must use http or https scheme")
+        if parsed.scheme == "http" and not self._allow_insecure_http:
+            raise EnovaError("base_url must use https unless allow_insecure_http=True")
         if parsed.fragment or parsed.query or parsed.params:
             raise EnovaError("base_url must not contain fragment, query, or params")
         return url.rstrip("/")
@@ -129,6 +135,14 @@ class AsyncEnovaClient:
         self._password = None
         self._log.debug("Credentials cleared from memory")
 
+    @staticmethod
+    def _redact_url_for_log(url: str) -> str:
+        """Redact sensitive query and fragment components from a URL for logs."""
+        parsed = urlparse(url)
+        redacted_query = "redacted" if parsed.query else ""
+        clean = parsed._replace(query=redacted_query, fragment="")
+        return clean.geturl()
+
     async def _ensure_session(self) -> aiohttp.ClientSession:
         if self._session is None:
             self._session = aiohttp.ClientSession(
@@ -152,7 +166,7 @@ class AsyncEnovaClient:
         Returns:
             A ``(body_text, final_url)`` tuple.
         """
-        self._log.debug("Request: %s %s", method, url)
+        self._log.debug("Request: %s %s", method, self._redact_url_for_log(url))
         session = await self._ensure_session()
 
         headers = kwargs.pop("headers", {})
@@ -162,7 +176,9 @@ class AsyncEnovaClient:
         for attempt in range(self._retries + 1):
             try:
                 async with session.request(method, url, headers=headers, **kwargs) as resp:
-                    self._log.debug("Response: %s %s", resp.status, resp.url)
+                    self._log.debug(
+                        "Response: %s %s", resp.status, self._redact_url_for_log(str(resp.url))
+                    )
                     if resp.status in _RETRYABLE_STATUSES:
                         if attempt < self._retries:
                             self._log.warning(
@@ -198,6 +214,8 @@ class AsyncEnovaClient:
         if not self._external_session and self._session:
             await self._session.close()
             self._session = None
+        if self._clear_credentials_on_close:
+            self.clear_credentials()
 
     @property
     def meter_id(self) -> str | None:
