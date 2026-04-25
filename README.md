@@ -2,10 +2,11 @@
 
 A Python library for downloading electricity usage data from the [Enova Power](https://enovapower.com) customer portal.
 
-Enova Power serves residential and commercial customers in the Kitchener-Waterloo region of Ontario, Canada. Their My Account portal provides smart meter data exports, but only through a web UI. This library automates that process so you can pull your usage data into scripts, notebooks, dashboards, or Home Assistant.
+Enova Power serves residential and commercial customers in the Kitchener-Waterloo region of Ontario, Canada. Their My Account portal provides smart meter data exports, but only through a web UI. This library automates that process so you can pull your usage data into scripts, notebooks, dashboards, or data pipelines.
 
 ## Quick start
-### Install the library
+
+### Install
 
 Using [uv](https://docs.astral.sh/uv/) (recommended):
 ```
@@ -17,9 +18,18 @@ Using pip:
 pip install enovapower
 ```
 
+### Environment variables
+
+Credentials can be set via environment variables instead of passing them directly:
+
+```bash
+export ENOVA_USERNAME="user@example.com"
+export ENOVA_PASSWORD="your_password"
+```
+
 ### Async client (primary)
 
-The `AsyncEnovaClient` is the primary interface, designed for async frameworks like Home Assistant.
+The `AsyncEnovaClient` is the primary interface.
 
 ```python
 from datetime import date
@@ -34,7 +44,7 @@ async with AsyncEnovaClient() as client:
 
 ### Sync client (convenience)
 
-The `EnovaClient` is a thin synchronous wrapper for scripts, notebooks, and other non-async contexts. It runs a dedicated background event loop so it works both standalone and inside an existing async event loop.
+The `EnovaClient` is a thin synchronous wrapper for scripts and non-async contexts. It runs a dedicated background event loop.
 
 ```python
 from datetime import date
@@ -77,7 +87,7 @@ with UsageStore("usage.db") as store:
 
 ## Polling interval
 
-The Enova portal is a small utility web UI, not a high-throughput API. Avoid polling more frequently than every 15 minutes. For Home Assistant integrations, a `scan_interval` of 30 minutes or more is recommended.
+The Enova portal is a utility web UI, not a high-throughput API. Avoid polling more frequently than every 15 minutes. A 30-minute interval is recommended for regular updates.
 
 ## Logging
 
@@ -106,7 +116,7 @@ client = AsyncEnovaClient(logger=my_logger)
 store = UsageStore("usage.db", logger=my_logger)
 ```
 
-### Using built-in configuration
+### Built-in configuration
 
 The library provides a convenience function to set up default handlers:
 
@@ -123,9 +133,11 @@ configure_logging(
 )
 ```
 
-## Security note
+## Security
 
-When credentials are passed to `login()`, they are stored in memory so the client can automatically re-authenticate if the session expires. Credentials are never written to disk. In Home Assistant, use `ConfigEntry`-based credential management and pass credentials explicitly to `login()` rather than relying on environment variables.
+Credentials passed to `login()` are stored in memory to enable automatic re-authentication on session expiry. They are never written to disk.
+
+The library requires HTTPS by default. Use `allow_insecure_http=True` only for local testing against a development endpoint.
 
 ## Documentation
 

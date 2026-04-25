@@ -3,6 +3,7 @@
 ## Table of Contents
 
 - [Authentication](#authentication)
+- [Environment Variables](#environment-variables)
 - [Downloading Usage Data](#downloading-usage-data)
   - [CSV](#csv)
   - [Green Button XML](#green-button-xml)
@@ -40,7 +41,27 @@ print(client.meter_id)        # e.g. "111111"
 print(client.account_number)  # e.g. "1234567890"
 ```
 
-The client maintains an `aiohttp.ClientSession` internally, so the login session persists across multiple download calls. If the session expires, you will need to call `login()` again.
+The client maintains an `aiohttp.ClientSession` internally, so the login session persists across multiple download calls. If the session expires, the client will automatically re-authenticate.
+
+---
+
+## Environment Variables
+
+Credentials can be set via environment variables instead of passing them directly:
+
+```bash
+export ENOVA_USERNAME="user@example.com"
+export ENOVA_PASSWORD="your_password"
+```
+
+```python
+from enovapower import EnovaClient
+
+client = EnovaClient()
+client.login()  # reads from ENOVA_USERNAME and ENOVA_PASSWORD
+```
+
+Environment variables take precedence over any arguments passed to `login()`. Explicit arguments override the environment.
 
 ---
 
@@ -89,7 +110,7 @@ Duplicate readings at chunk boundaries are automatically removed.
 
 ### Latest Reading
 
-To get just the most recent day's data (useful for dashboards and integrations):
+To get just the most recent day's data:
 
 ```python
 latest = client.get_latest_usage()
@@ -117,10 +138,11 @@ for r in readings:
 
 ## Async Client
 
-The `AsyncEnovaClient` provides the same functionality using `aiohttp` for async I/O, making it suitable for Home Assistant integrations and other async applications.
+The `AsyncEnovaClient` provides the same functionality using `aiohttp` for async I/O:
 
 ```python
 import asyncio
+from datetime import date
 from enovapower import AsyncEnovaClient
 
 async def main():
@@ -145,7 +167,7 @@ async def main():
 asyncio.run(main())
 ```
 
-The async client accepts an optional `aiohttp.ClientSession` for environments that manage their own sessions (e.g. Home Assistant):
+The async client accepts an optional `aiohttp.ClientSession` for environments that manage their own sessions:
 
 ```python
 import aiohttp
@@ -303,7 +325,7 @@ Returned by `download_tariff()` and `store.load_tariff()`.
 The library raises specific exceptions for different failure modes:
 
 ```python
-from enovapower import EnovaError, EnovaAuthError, EnovaConnectionError
+from enovapower import EnovaError, EnovaAuthError, EnovaNetworkError
 
 try:
     client.login("bad_account", "bad_password")
@@ -319,7 +341,7 @@ except EnovaError as e:
 | Exception | When |
 |---|---|
 | `EnovaAuthError` | Login credentials are wrong, CSRF token missing, or session redirect to login page |
-| `EnovaConnectionError` | Network failure or timeout reaching the portal |
+| `EnovaNetworkError` | Network failure or timeout reaching the portal |
 | `EnovaError` | Date range exceeds 90 days, from > to, not logged in, or download form not found in response |
 
 All exceptions inherit from `EnovaError`, so catching `EnovaError` handles all cases.
@@ -395,5 +417,5 @@ logger = get_logger()
 
 - **No public API**: The portal does not expose a REST API. This library scrapes the web forms, so it may break if the portal HTML changes.
 - **90-day limit per request**: The portal enforces a maximum of 90 days per download. `download_usage_chunked()` works around this.
-- **Session-based auth**: Sessions expire after inactivity. There is no token refresh — call `login()` again if you get download errors.
+- **Session-based auth**: Sessions expire after inactivity. There is no token refresh — the client will automatically re-authenticate if you pass credentials to `login()`.
 - **Single meter**: The library currently uses the first meter ID found on the account. Multi-meter accounts are not yet supported.
