@@ -333,7 +333,7 @@ except EnovaAuthError as e:
     print(f"Login failed: {e}")
 
 try:
-    client.download_usage(date(2026, 3, 26), date(2026, 2, 25))
+    client.download_usage_xml(date(2026, 1, 1), date(2026, 7, 1))
 except EnovaError as e:
     print(f"Download failed: {e}")
 ```
@@ -342,7 +342,7 @@ except EnovaError as e:
 |---|---|
 | `EnovaAuthError` | Login credentials are wrong, CSRF token missing, or session redirect to login page |
 | `EnovaNetworkError` | Network failure or timeout reaching the portal |
-| `EnovaError` | Date range exceeds 90 days, from > to, not logged in, or download form not found in response |
+| `EnovaError` | Date range invalid, not logged in, download form not found, or XML/tariff range exceeds 90 days |
 
 All exceptions inherit from `EnovaError`, so catching `EnovaError` handles all cases.
 
