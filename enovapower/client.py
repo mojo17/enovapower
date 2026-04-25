@@ -116,13 +116,6 @@ class EnovaClient:
     ) -> str:
         return self._run(self._async.download_usage_xml(from_date, to_date))
 
-    def download_usage_chunked(
-        self,
-        from_date: date,
-        to_date: date,
-    ) -> list[UsageReading]:
-        return self._run(self._async.download_usage_chunked(from_date, to_date))
-
     def download_tariff(
         self,
         from_date: date,

@@ -294,7 +294,7 @@ class UsageStore:
         from_date = _months_ago(to_date, months)
 
         self._log.info("Seeding database with %d months of data", months)
-        readings = client.download_usage_chunked(from_date, to_date)
+        readings = client.download_usage(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
         self._log.info("Seeded %d readings", len(readings))
@@ -329,7 +329,7 @@ class UsageStore:
         self._log.info(
             "Updating database from %s to %s", from_date.isoformat(), to_date.isoformat()
         )
-        readings = client.download_usage_chunked(from_date, to_date)
+        readings = client.download_usage(from_date, to_date)
         if readings:
             self.save(client.meter_id, readings)
         self._log.info("Updated %d new readings", len(readings))
@@ -349,7 +349,7 @@ class UsageStore:
         from_date = _months_ago(to_date, months)
 
         self._log.info("Async seeding database with %d months of data", months)
-        readings = await client.download_usage_chunked(from_date, to_date)
+        readings = await client.download_usage(from_date, to_date)
         if readings:
             loop = asyncio.get_running_loop()
             await loop.run_in_executor(None, self.save, client.meter_id, readings)
@@ -381,7 +381,7 @@ class UsageStore:
         self._log.info(
             "Async updating database from %s to %s", from_date.isoformat(), to_date.isoformat()
         )
-        readings = await client.download_usage_chunked(from_date, to_date)
+        readings = await client.download_usage(from_date, to_date)
         if readings:
             await loop.run_in_executor(None, self.save, client.meter_id, readings)
         self._log.info("Async updated %d new readings", len(readings))

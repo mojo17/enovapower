@@ -96,10 +96,10 @@ print(xml_data[:200])  # raw XML string
 
 ### Long Date Ranges
 
-The portal limits each request to 90 days. For longer ranges, use `download_usage_chunked()` which automatically splits the request into 90-day windows and concatenates the results:
+The portal limits each request to 90 days. `download_usage()` automatically splits longer ranges into 90-day windows and concatenates the results:
 
 ```python
-readings = client.download_usage_chunked(
+readings = client.download_usage(
     from_date=date(2025, 6, 1),
     to_date=date(2026, 3, 26),
 )
@@ -416,6 +416,6 @@ logger = get_logger()
 ## Limitations
 
 - **No public API**: The portal does not expose a REST API. This library scrapes the web forms, so it may break if the portal HTML changes.
-- **90-day limit per request**: The portal enforces a maximum of 90 days per download. `download_usage_chunked()` works around this.
+- **90-day limit per request**: The portal enforces a maximum of 90 days per download. `download_usage()` automatically handles this.
 - **Session-based auth**: Sessions expire after inactivity. There is no token refresh — the client will automatically re-authenticate if you pass credentials to `login()`.
 - **Single meter**: The library currently uses the first meter ID found on the account. Multi-meter accounts are not yet supported.

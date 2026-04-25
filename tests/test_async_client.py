@@ -2,7 +2,7 @@
 
 import os
 import pickle
-from datetime import date, timedelta
+from datetime import date
 from unittest.mock import AsyncMock, MagicMock, patch
 
 import aiohttp
@@ -317,11 +317,13 @@ class TestAsyncDownloadUsage:
         client._meter_id = meter_id
         return client
 
-    async def test_date_range_exceeds_max(self):
+    async def test_date_range_exceeds_max_auto_chunks(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
         client = self._make_client(session)
-        with pytest.raises(EnovaError, match="cannot exceed"):
+        with patch.object(client, "_download_usage_chunked", new_callable=AsyncMock) as mock_chunk:
+            mock_chunk.return_value = []
             await client.download_usage(date(2026, 1, 1), date(2026, 7, 1))
+        mock_chunk.assert_called_once_with(date(2026, 1, 1), date(2026, 7, 1))
 
     async def test_from_date_after_to_date(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
@@ -442,72 +444,7 @@ class TestAsyncDownloadUsageXml:
 
 
 # ---------------------------------------------------------------------------
-# AsyncEnovaClient.download_usage_chunked tests
-# ---------------------------------------------------------------------------
-
-class TestAsyncDownloadUsageChunked:
-    async def test_single_chunk(self):
-        client = AsyncEnovaClient()
-        client._meter_id = "111111"
-        with patch.object(client, "download_usage", new_callable=AsyncMock) as mock_dl:
-            mock_dl.return_value = parse_csv(MINIMAL_CSV)
-            readings = await client.download_usage_chunked(
-                date(2026, 3, 1), date(2026, 3, 10)
-            )
-
-        mock_dl.assert_called_once_with(date(2026, 3, 1), date(2026, 3, 10))
-        assert len(readings) == 1
-
-    async def test_multiple_chunks(self):
-        client = AsyncEnovaClient()
-        client._meter_id = "111111"
-
-        chunk1 = parse_csv(MINIMAL_CSV)
-        chunk2_csv = MINIMAL_CSV.replace("2026-03-01", "2026-06-01")
-        chunk2 = parse_csv(chunk2_csv)
-
-        with patch.object(client, "download_usage", new_callable=AsyncMock) as mock_dl:
-            mock_dl.side_effect = [chunk1, chunk2]
-            from_d = date(2026, 3, 1)
-            to_d = from_d + timedelta(days=120)
-            await client.download_usage_chunked(from_d, to_d)
-
-        assert mock_dl.call_count == 2
-        first_call = mock_dl.call_args_list[0]
-        assert first_call[0][0] == date(2026, 3, 1)
-        assert first_call[0][1] == date(2026, 5, 29)
-        second_call = mock_dl.call_args_list[1]
-        assert second_call[0][0] == date(2026, 5, 30)
-        assert second_call[0][1] == to_d
-
-    async def test_empty_result(self):
-        client = AsyncEnovaClient()
-        client._meter_id = "111111"
-        with patch.object(client, "download_usage", new_callable=AsyncMock) as mock_dl:
-            mock_dl.return_value = []
-            readings = await client.download_usage_chunked(
-                date(2026, 3, 1), date(2026, 3, 10)
-            )
-
-        assert readings == []
-
-    async def test_deduplication(self):
-        client = AsyncEnovaClient()
-        client._meter_id = "111111"
-        with patch.object(client, "download_usage", new_callable=AsyncMock) as mock_dl:
-            mock_dl.side_effect = [
-                parse_csv(MINIMAL_CSV),
-                parse_csv(MINIMAL_CSV),
-            ]
-            from_d = date(2026, 3, 1)
-            to_d = from_d + timedelta(days=100)
-            readings = await client.download_usage_chunked(from_d, to_d)
-
-        assert len(readings) == 1
-
-
-# ---------------------------------------------------------------------------
-# AsyncEnovaClient.download_tariff tests
+# AsyncEnovaClient.download_usage tests
 # ---------------------------------------------------------------------------
 
 class TestAsyncDownloadTariff:

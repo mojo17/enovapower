@@ -14,7 +14,7 @@ class SyncClientProtocol(Protocol):
     @property
     def meter_id(self) -> str | None: ...
 
-    def download_usage_chunked(
+    def download_usage(
         self, from_date: date, to_date: date
     ) -> list[UsageReading]: ...
 
@@ -25,6 +25,6 @@ class AsyncClientProtocol(Protocol):
     @property
     def meter_id(self) -> str | None: ...
 
-    async def download_usage_chunked(
+    async def download_usage(
         self, from_date: date, to_date: date
     ) -> list[UsageReading]: ...

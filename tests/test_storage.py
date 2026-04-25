@@ -23,7 +23,7 @@ def _mock_client(meter_id=METER_ID, readings=None):
     client = MagicMock()
     type(client).meter_id = PropertyMock(return_value=meter_id)
     if readings is not None:
-        client.download_usage_chunked.return_value = readings
+        client.download_usage.return_value = readings
     return client
 
 
@@ -31,7 +31,7 @@ def _mock_async_client(meter_id=METER_ID, readings=None):
     client = AsyncMock()
     type(client).meter_id = PropertyMock(return_value=meter_id)
     if readings is not None:
-        client.download_usage_chunked.return_value = readings
+        client.download_usage.return_value = readings
     return client
 
 
@@ -212,8 +212,8 @@ class TestSeed:
             readings = store.seed(client)
 
         assert len(readings) == 1
-        client.download_usage_chunked.assert_called_once()
-        args = client.download_usage_chunked.call_args[0]
+        client.download_usage.assert_called_once()
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2025, 3, 27)  # 12 months ago
         assert args[1] == date(2026, 3, 27)
 
@@ -226,7 +226,7 @@ class TestSeed:
         with UsageStore(":memory:") as store:
             store.seed(client, months=6)
 
-        args = client.download_usage_chunked.call_args[0]
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2025, 9, 27)  # 6 months ago
 
     def test_seed_stores_data(self):
@@ -273,7 +273,7 @@ class TestUpdate:
             readings = store.update(client)
 
         assert len(readings) == 1
-        args = client.download_usage_chunked.call_args[0]
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2026, 3, 3)   # day after latest
         assert args[1] == date(2026, 3, 27)   # today
 
@@ -289,7 +289,7 @@ class TestUpdate:
             readings = store.update(client)
 
         assert readings == []
-        client.download_usage_chunked.assert_not_called()
+        client.download_usage.assert_not_called()
 
     def test_update_stores_new_data(self):
         new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-10")
@@ -477,8 +477,8 @@ class TestAsyncSeed:
             readings = await store.async_seed(client)
 
         assert len(readings) == 1
-        client.download_usage_chunked.assert_awaited_once()
-        args = client.download_usage_chunked.call_args[0]
+        client.download_usage.assert_awaited_once()
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2025, 3, 27)  # 12 months ago
         assert args[1] == date(2026, 3, 27)
 
@@ -491,7 +491,7 @@ class TestAsyncSeed:
         with UsageStore(":memory:") as store:
             await store.async_seed(client, months=6)
 
-        args = client.download_usage_chunked.call_args[0]
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2025, 9, 27)  # 6 months ago
 
     async def test_async_seed_stores_data(self):
@@ -539,7 +539,7 @@ class TestAsyncUpdate:
             readings = await store.async_update(client)
 
         assert len(readings) == 1
-        args = client.download_usage_chunked.call_args[0]
+        args = client.download_usage.call_args[0]
         assert args[0] == date(2026, 3, 3)   # day after latest
         assert args[1] == date(2026, 3, 27)   # today
 
@@ -555,7 +555,7 @@ class TestAsyncUpdate:
             readings = await store.async_update(client)
 
         assert readings == []
-        client.download_usage_chunked.assert_not_awaited()
+        client.download_usage.assert_not_awaited()
 
     async def test_async_update_stores_new_data(self):
         new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-10")

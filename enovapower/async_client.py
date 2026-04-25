@@ -398,11 +398,6 @@ class AsyncEnovaClient:
 
     def _validate_download_params(self, from_date: date, to_date: date) -> None:
         """Validate date range and login state for download methods."""
-        if (to_date - from_date).days > MAX_RANGE_DAYS:
-            raise EnovaError(
-                f"Date range cannot exceed {MAX_RANGE_DAYS} days. "
-                f"Use download_usage_chunked() for longer ranges."
-            )
         if to_date < from_date:
             raise EnovaError("from_date must be before to_date")
         if not self._meter_id:
@@ -414,6 +409,9 @@ class AsyncEnovaClient:
         to_date: date,
     ) -> list[UsageReading]:
         """Download smart meter usage data for a date range.
+
+        Automatically splits requests into 90-day chunks for date ranges exceeding
+        the portal limit, concatenates results, and deduplicates overlapping days.
 
         If the session has expired, attempts to re-login once and retry.
 
@@ -430,6 +428,10 @@ class AsyncEnovaClient:
             EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
+
+        if (to_date - from_date).days > MAX_RANGE_DAYS:
+            return await self._download_usage_chunked(from_date, to_date)
+
         self._log.info("Downloading usage: %s to %s", from_date.isoformat(), to_date.isoformat())
 
         form_data = self._build_form_data(from_date, to_date, csv_download=True)
@@ -482,6 +484,8 @@ class AsyncEnovaClient:
             EnovaSessionExpiredError: If session expired and re-login failed.
             EnovaNetworkError: On network failure.
         """
+        if (to_date - from_date).days > MAX_RANGE_DAYS:
+            raise EnovaError(f"Date range cannot exceed {MAX_RANGE_DAYS} days for XML download.")
         self._validate_download_params(from_date, to_date)
         self._log.info(
             "Downloading usage XML: %s to %s", from_date.isoformat(), to_date.isoformat()
@@ -512,20 +516,12 @@ class AsyncEnovaClient:
         self._log.info("Downloaded XML (%d bytes)", len(xml_text))
         return xml_text
 
-    async def download_usage_chunked(
+    async def _download_usage_chunked(
         self,
         from_date: date,
         to_date: date,
     ) -> list[UsageReading]:
-        """Download usage data for ranges exceeding 90 days by chunking requests.
-
-        Args:
-            from_date: Start date (inclusive).
-            to_date: End date (inclusive).
-
-        Returns:
-            list[UsageReading] with all data concatenated and deduplicated.
-        """
+        """Download usage data for ranges exceeding 90 days by chunking requests."""
         all_readings: list[UsageReading] = []
         seen_dates: set[date] = set()
         current = from_date
@@ -563,6 +559,8 @@ class AsyncEnovaClient:
             EnovaSessionExpiredError: If session expired and re-login failed.
             EnovaNetworkError: On network failure.
         """
+        if (to_date - from_date).days > MAX_RANGE_DAYS:
+            raise EnovaError(f"Date range cannot exceed {MAX_RANGE_DAYS} days.")
         self._validate_download_params(from_date, to_date)
 
         self._log.info("Downloading tariff: %s to %s", from_date.isoformat(), to_date.isoformat())

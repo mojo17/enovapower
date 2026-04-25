@@ -200,14 +200,14 @@ class TestSyncFacade:
             assert result == "<xml/>"
         client.close()
 
-    def test_download_usage_chunked_delegates_to_async(self):
+    def test_download_usage_delegates_long_range(self):
         client = EnovaClient()
         readings = parse_csv(MINIMAL_CSV)
         with patch.object(
-            client._async, "download_usage_chunked",
+            client._async, "download_usage",
             new_callable=AsyncMock, return_value=readings,
         ) as mock_dl:
-            result = client.download_usage_chunked(
+            result = client.download_usage(
                 date(2026, 3, 1), date(2026, 3, 10)
             )
             mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 10))
