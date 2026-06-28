@@ -7,8 +7,15 @@ on:
   workflow_dispatch: {}
 
 jobs:
-  build:
+  publish:
+    # Publish only from GitHub Actions: PyPI Trusted Publishing (OIDC) isn't
+    # available on Gitea Actions, which also lacks the v4 artifact backend.
+    # On Gitea this condition is false, so the job is skipped (not failed).
+    if: ${{ github.server_url == 'https://github.com' }}
     runs-on: ubuntu-latest
+    environment: pypi
+    permissions:
+      id-token: write # required for Trusted Publishing (OIDC); no token stored
     steps:
       - uses: actions/checkout@v4
 
@@ -21,24 +28,6 @@ jobs:
 
       - name: Check metadata
         run: pipx run twine check dist/*
-
-      - uses: actions/upload-artifact@v4
-        with:
-          name: dist
-          path: dist/
-
-  publish:
-    needs: build
-    runs-on: ubuntu-latest
-    # Matches the environment configured on the PyPI trusted publisher.
-    environment: pypi
-    permissions:
-      id-token: write # required for PyPI Trusted Publishing (OIDC); no token needed
-    steps:
-      - uses: actions/download-artifact@v4
-        with:
-          name: dist
-          path: dist/
 
       - name: Publish to PyPI
         uses: pypa/gh-action-pypi-publish@release/v1
