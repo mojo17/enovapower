@@ -1,5 +1,12 @@
 # Changelog
 
+## 0.5.1
+
+### Security
+
+- Raised the minimum `aiohttp` to `>=3.14.1` to exclude versions affected by the
+  2026 client-side CVEs (fixed in aiohttp 3.14.0/3.14.1).
+
 ## 0.5.0
 
 ### Added

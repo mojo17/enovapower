@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enovapower"
-version = "0.5.0"
+version = "0.5.1"
 description = "Python client for downloading electricity usage data from Enova Power"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,9 +26,9 @@ classifiers = [
 ]
 dependencies = [
     "beautifulsoup4>=4.12",
-    # 3.10.11 is the first release clear of the client-relevant CVEs in the
-    # 3.9.x / early-3.10 line (request-smuggling-class parsing fixes).
-    "aiohttp>=3.10.11",
+    # 3.14.1 excludes the versions affected by the 2026 client-side CVEs
+    # (fixed in aiohttp 3.14.0/3.14.1).
+    "aiohttp>=3.14.1",
     # Safe XML parsing for Green Button exports (guards entity-expansion).
     "defusedxml>=0.7",
 ]

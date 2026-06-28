@@ -10,7 +10,7 @@ from enovapower.models import GreenButtonInterval, TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_green_button_xml, parse_tariff_html
 from enovapower.storage import UsageStore
 
-__version__ = "0.5.0"
+__version__ = "0.5.1"
 
 __all__ = [
     "__version__",
