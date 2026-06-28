@@ -44,7 +44,13 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        run: pip install -e ".[dev]" pip-audit
+        # Only the runtime deps (no dev tooling): those are what ship to users.
+        run: |
+          python -m pip install --upgrade pip setuptools
+          python -m pip install -e . pip-audit
 
       - name: Audit dependencies for known vulnerabilities
-        run: pip-audit --strict
+        # Skip the editable-installed project itself (enovapower isn't on PyPI
+        # while developing). --strict can't be combined with --skip-editable
+        # because it treats the skipped project as a failure.
+        run: pip-audit --skip-editable
