@@ -1,5 +1,7 @@
 # enovapower
 
+> **⚠️ Unofficial project — not affiliated with, endorsed by, or supported by Enova Power Corp.** "Enova Power" is a trademark of its respective owner. Use at your own risk under the Apache-2.0 license.
+
 A Python library for downloading electricity usage data from the [Enova Power](https://enovapower.com) customer portal.
 
 Enova Power serves residential and commercial customers in the Kitchener-Waterloo region of Ontario, Canada. Their My Account portal provides smart meter data exports, but only through a web UI. This library automates that process so you can pull your usage data into scripts, notebooks, dashboards, or data pipelines.
