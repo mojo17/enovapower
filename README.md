@@ -62,7 +62,11 @@ for r in readings:
 
 - Authenticate with the Enova Power My Account portal
 - Download hourly smart meter usage data as `UsageReading` dataclasses
-- Download Green Button XML exports (raw XML string, no built-in parser)
+- Convert hourly readings to timezone-aware UTC `(timestamp, kWh)` intervals via `UsageReading.intervals()`
+- Distinguish missing hours (`None`) from real zero-consumption hours
+- Download Green Button XML exports and parse them with `parse_green_button_xml()` (safe `defusedxml` parsing)
+- Multi-meter accounts via `meter_ids` / `select_meter()`
+- Optional re-authentication callback to avoid retaining credentials
 - Download tariff rates for all pricing plans (Time-of-Use, Ultra-Low Overnight, Tiered)
 - Automatically chunk requests for date ranges exceeding 90 days
 - Store and incrementally update usage history in a local SQLite database
@@ -138,6 +142,8 @@ configure_logging(
 Credentials passed to `login()` are stored in memory to enable automatic re-authentication on session expiry. They are never written to disk.
 
 The library requires HTTPS by default. Use `allow_insecure_http=True` only for local testing against a development endpoint.
+
+`UsageStore` databases are created with owner-only permissions (`0600`), since hourly usage data can reveal household occupancy patterns.
 
 ## Documentation
 

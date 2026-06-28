@@ -58,7 +58,7 @@ class EnovaClient:
     def __init__(self, retries: int = 3, base_url: str | None = None) -> None:
         from enovapower.async_client import AsyncEnovaClient
 
-        kwargs: dict = {"retries": retries}
+        kwargs: dict[str, Any] = {"retries": retries}
         if base_url is not None:
             kwargs["base_url"] = base_url
 
@@ -92,8 +92,15 @@ class EnovaClient:
         return self._async.meter_id
 
     @property
+    def meter_ids(self) -> list[str]:
+        return self._async.meter_ids
+
+    @property
     def account_number(self) -> str | None:
         return self._async.account_number
+
+    def select_meter(self, meter_id: str) -> None:
+        self._async.select_meter(meter_id)
 
     def login(
         self,

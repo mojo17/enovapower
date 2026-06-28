@@ -1,7 +1,8 @@
 """Async client for downloading electricity usage and tariff data from Enova Power.
 
 This is the primary implementation. The synchronous ``EnovaClient`` in
-``client.py`` is a thin facade that delegates to this class via ``asyncio.run()``.
+``client.py`` is a thin facade that delegates to this class via a dedicated
+background-thread event loop.
 """
 
 from __future__ import annotations
@@ -10,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from typing import Any
 from urllib.parse import parse_qs, urljoin, urlparse
@@ -34,6 +36,10 @@ MAX_RANGE_DAYS = 90
 _DEFAULT_RETRIES = 3
 _DEFAULT_TIMEOUT = aiohttp.ClientTimeout(total=30, connect=10)
 
+# Cap on response body size to bound memory use against a misbehaving or
+# spoofed endpoint. Legitimate usage/tariff exports are well under this.
+_MAX_RESPONSE_BYTES = 64 * 1024 * 1024
+
 # The portal blocks requests with non-browser User-Agent headers, so we
 # present as a standard browser to avoid 403 or empty responses.
 _USER_AGENT = (
@@ -44,6 +50,10 @@ _USER_AGENT = (
 
 # HTTP status codes that warrant a retry.
 _RETRYABLE_STATUSES = frozenset({429, 500, 502, 503, 504})
+
+# A coroutine returning fresh ``(access_code, password)`` credentials, used to
+# re-authenticate on session expiry without the client retaining a password.
+ReauthCallback = Callable[[], Awaitable[tuple[str, str]]]
 
 
 def _jitter() -> float:
@@ -79,19 +89,26 @@ class AsyncEnovaClient:
         base_url: str = _DEFAULT_BASE_URL,
         allow_insecure_http: bool = False,
         clear_credentials_on_close: bool = True,
+        reauth_callback: ReauthCallback | None = None,
         logger: logging.Logger | None = None,
     ) -> None:
         self._external_session = session is not None
         self._session = session
         self._meter_id: str | None = None
+        self._meter_ids: list[str] = []
         self._account_number: str | None = None
         self._access_code: str | None = None
         self._password: str | None = None
         self._retries = max(retries, 0)
         self._allow_insecure_http = allow_insecure_http
         self._clear_credentials_on_close = clear_credentials_on_close
+        self._reauth_callback = reauth_callback
         self._base_url = self._validate_base_url(base_url)
         self._log = logger if logger is not None else get_logger()
+        # Serializes re-login so concurrent expired requests don't stampede,
+        # and a generation counter lets a waiter skip a redundant re-login.
+        self._auth_lock = asyncio.Lock()
+        self._login_generation = 0
 
     def _validate_base_url(self, url: str) -> str:
         """Validate and normalize base_url to prevent SSRF."""
@@ -117,17 +134,22 @@ class AsyncEnovaClient:
 
         return url
 
-    def __getstate__(self) -> dict:
-        """Exclude credentials from pickling."""
+    def __getstate__(self) -> dict[str, Any]:
+        """Exclude credentials and unpicklable runtime objects from pickling."""
         state = self.__dict__.copy()
         state["_access_code"] = None
         state["_password"] = None
+        # asyncio.Lock and an arbitrary callback are not picklable and are
+        # tied to a specific event loop; recreate them on restore.
+        state.pop("_auth_lock", None)
+        state["_reauth_callback"] = None
         return state
 
-    def __setstate__(self, state: dict) -> None:
+    def __setstate__(self, state: dict[str, Any]) -> None:
         """Restore state, requiring re-login."""
         self.__dict__.update(state)
         self._log = get_logger()
+        self._auth_lock = asyncio.Lock()
 
     def clear_credentials(self) -> None:
         """Clear stored credentials from memory."""
@@ -188,7 +210,21 @@ class AsyncEnovaClient:
                             continue
                         resp.raise_for_status()
                     resp.raise_for_status()
+                    content_length = resp.content_length
+                    if (
+                        isinstance(content_length, int)
+                        and content_length > _MAX_RESPONSE_BYTES
+                    ):
+                        raise EnovaNetworkError(
+                            f"{error_msg}: response too large "
+                            f"({content_length} bytes > {_MAX_RESPONSE_BYTES})"
+                        )
                     text = await resp.text()
+                    if len(text) > _MAX_RESPONSE_BYTES:
+                        raise EnovaNetworkError(
+                            f"{error_msg}: response exceeded "
+                            f"{_MAX_RESPONSE_BYTES} bytes"
+                        )
                     return text, str(resp.url)
             except aiohttp.ClientResponseError as err:
                 self._log.error("Client response error: %s", err)
@@ -222,8 +258,28 @@ class AsyncEnovaClient:
         return self._meter_id
 
     @property
+    def meter_ids(self) -> list[str]:
+        """All meter IDs found on the account; the active one is ``meter_id``."""
+        return list(self._meter_ids)
+
+    @property
     def account_number(self) -> str | None:
         return self._account_number
+
+    def select_meter(self, meter_id: str) -> None:
+        """Set the active meter used by subsequent downloads.
+
+        Args:
+            meter_id: One of the IDs from :attr:`meter_ids`.
+
+        Raises:
+            EnovaError: If ``meter_id`` is not one of the account's meters.
+        """
+        if meter_id not in self._meter_ids:
+            raise EnovaError(
+                f"Unknown meter_id {meter_id!r}; known meters: {self._meter_ids}"
+            )
+        self._meter_id = meter_id
 
     async def login(
         self,
@@ -294,21 +350,29 @@ class AsyncEnovaClient:
         soup = BeautifulSoup(text, "html.parser")
         await self._extract_account_info(soup)
         self._account_number = access_code
-        self._log.info("Login successful, meter_id=%s", self._meter_id)
+        self._login_generation += 1
+        self._log.info("Login successful")
+        self._log.debug("Resolved meter_id=%s", self._meter_id)
 
     async def _extract_account_info(self, soup: BeautifulSoup) -> None:
-        """Extract meter ID from the dashboard page."""
+        """Extract meter ID(s) from the dashboard page.
+
+        Populates :attr:`meter_ids` with every meter found and sets the active
+        :attr:`meter_id` to the first. Use :meth:`select_meter` to switch.
+        """
+        meter_ids: list[str] = []
+
         refresh_link = soup.find("a", id="refresh_btn")
         if refresh_link:
             href = refresh_link.get("href", "")
-            if "inMeterID=" in href:
+            if isinstance(href, str) and "inMeterID=" in href:
                 parsed = urlparse(href)
                 qs = parse_qs(parsed.query)
-                meter_ids = qs.get("inMeterID", [])
-                if meter_ids:
-                    self._meter_id = meter_ids[0]
+                for mid in qs.get("inMeterID", []):
+                    if mid and mid not in meter_ids:
+                        meter_ids.append(mid)
 
-        if not self._meter_id:
+        if not meter_ids:
             try:
                 text, _ = await self._request(
                     "GET",
@@ -321,11 +385,31 @@ class AsyncEnovaClient:
                     error_msg="Failed to fetch meter info",
                 )
                 iframe_soup = BeautifulSoup(text, "html.parser")
-                meter_input = iframe_soup.find("input", {"name": "selectedMeterId"})
-                if meter_input:
-                    self._meter_id = meter_input.get("value")
+                meter_ids = self._extract_meter_ids_from_form(iframe_soup)
             except EnovaNetworkError:
                 pass
+
+        if meter_ids:
+            self._meter_ids = meter_ids
+            self._meter_id = meter_ids[0]
+
+    @staticmethod
+    def _extract_meter_ids_from_form(soup: BeautifulSoup) -> list[str]:
+        """Collect meter IDs from a meter ``<select>`` or single hidden input."""
+        meter_ids: list[str] = []
+        select = soup.find("select", {"name": "selectedMeterId"})
+        if select:
+            for option in select.find_all("option"):
+                value = option.get("value")
+                if isinstance(value, str) and value and value not in meter_ids:
+                    meter_ids.append(value)
+        if not meter_ids:
+            meter_input = soup.find("input", {"name": "selectedMeterId"})
+            if meter_input:
+                value = meter_input.get("value")
+                if isinstance(value, str) and value:
+                    meter_ids.append(value)
+        return meter_ids
 
     @staticmethod
     def _is_session_expired(url: str) -> bool:
@@ -339,12 +423,27 @@ class AsyncEnovaClient:
         )
 
     async def _relogin(self) -> None:
-        """Re-login using stored credentials.
+        """Re-login via the reauth callback, or stored credentials.
+
+        If a ``reauth_callback`` was provided, it is invoked to obtain fresh
+        credentials (letting the caller drive re-auth without the client
+        retaining a password). Otherwise the credentials stored from the last
+        ``login()`` are reused.
 
         Raises:
-            EnovaSessionExpiredError: If credentials are unavailable or
+            EnovaSessionExpiredError: If no re-auth source is available or
                 re-login fails.
         """
+        if self._reauth_callback is not None:
+            try:
+                access_code, password = await self._reauth_callback()
+                await self.login(access_code, password)
+            except EnovaAuthError as err:
+                raise EnovaSessionExpiredError(
+                    f"Session expired and reauth callback failed: {err}"
+                ) from err
+            return
+
         if not self._access_code or not self._password:
             raise EnovaSessionExpiredError(
                 "Session expired and no stored credentials for re-login."
@@ -362,11 +461,19 @@ class AsyncEnovaClient:
         error_msg: str = "Request failed",
         **kwargs: Any,
     ) -> tuple[str, str]:
-        """Execute request with automatic re-login on session expiry."""
+        """Execute request with automatic re-login on session expiry.
+
+        Re-login is serialized through ``_auth_lock`` so concurrent expired
+        requests don't all re-authenticate at once; a generation check skips
+        the re-login if another task already refreshed the session.
+        """
         text, resp_url = await self._request(method, url, error_msg=error_msg, **kwargs)
         if self._is_session_expired(resp_url):
-            self._log.info("Session expired, re-logging in")
-            await self._relogin()
+            generation = self._login_generation
+            async with self._auth_lock:
+                if self._login_generation == generation:
+                    self._log.info("Session expired, re-logging in")
+                    await self._relogin()
             text, resp_url = await self._request(
                 method, url, error_msg=f"{error_msg} after re-login", **kwargs
             )
@@ -375,7 +482,12 @@ class AsyncEnovaClient:
     def _build_form_data(
         self, from_date: date, to_date: date, *, csv_download: bool = True
     ) -> dict[str, str]:
-        """Build the form data dict for a Green Button download request."""
+        """Build the form data dict for a Green Button download request.
+
+        Callers must validate login state first (``_validate_download_params``),
+        which guarantees ``_meter_id`` is set.
+        """
+        assert self._meter_id is not None
         return {
             "para": "greenButtonDownloadV3",
             "GB_iso_fromDate": from_date.isoformat(),
@@ -450,7 +562,8 @@ class AsyncEnovaClient:
                 "Could not find spreadsheet download form in response. Session may have expired."
             )
 
-        export_url = excel_form.get("action", "")
+        action = excel_form.get("action", "")
+        export_url = action if isinstance(action, str) else ""
         export_url = self._validate_url(urljoin(self._base_url, export_url))
 
         csv_text, _ = await self._request(
@@ -504,7 +617,8 @@ class AsyncEnovaClient:
         if not xml_form:
             raise EnovaError("Could not find XML download form in response")
 
-        xml_url = xml_form.get("action", "")
+        action = xml_form.get("action", "")
+        xml_url = action if isinstance(action, str) else ""
         xml_url = self._validate_url(urljoin(self._base_url, xml_url))
 
         xml_text, _ = await self._request(
@@ -604,5 +718,5 @@ class AsyncEnovaClient:
         from_date = to_date - timedelta(days=3)
         readings = await self.download_usage(from_date, to_date)
         if readings:
-            return readings[-1]
+            return max(readings, key=lambda r: r.date)
         return None

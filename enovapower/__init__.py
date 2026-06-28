@@ -6,11 +6,11 @@ from enovapower.exceptions import (
     EnovaNetworkError,
     EnovaSessionExpiredError,
 )
-from enovapower.models import TariffRate, UsageReading
-from enovapower.parsers import parse_csv, parse_tariff_html
+from enovapower.models import GreenButtonInterval, TariffRate, UsageReading
+from enovapower.parsers import parse_csv, parse_green_button_xml, parse_tariff_html
 from enovapower.storage import UsageStore
 
-__version__ = "0.4.0"
+__version__ = "0.5.0"
 
 __all__ = [
     "__version__",
@@ -20,9 +20,11 @@ __all__ = [
     "EnovaError",
     "EnovaNetworkError",
     "EnovaSessionExpiredError",
+    "GreenButtonInterval",
     "TariffRate",
     "UsageReading",
     "UsageStore",
     "parse_csv",
+    "parse_green_button_xml",
     "parse_tariff_html",
 ]

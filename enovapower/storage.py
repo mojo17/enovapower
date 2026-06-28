@@ -4,11 +4,13 @@ from __future__ import annotations
 
 import asyncio
 import logging
+import os
 import sqlite3
 import threading
 from datetime import date, timedelta
 from pathlib import Path
 
+from enovapower.exceptions import EnovaError
 from enovapower.logger import get_logger
 from enovapower.models import HOUR_KEYS, TariffRate, UsageReading
 from enovapower.protocols import AsyncClientProtocol, SyncClientProtocol
@@ -79,10 +81,31 @@ class UsageStore:
         self._db_path = str(db_path)
         self._lock = threading.Lock()
         self._conn = sqlite3.connect(self._db_path, check_same_thread=False)
+        self._restrict_permissions()
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_TARIFF_TABLE)
         self._conn.commit()
         self._log = logger if logger is not None else get_logger()
+
+    def _restrict_permissions(self) -> None:
+        """Restrict the DB file to owner-only (0600).
+
+        Hourly usage data reveals household occupancy patterns, so the file is
+        made owner read/write only. No-ops for in-memory databases and on
+        platforms where ``chmod`` is unsupported.
+        """
+        if self._db_path == ":memory:" or self._db_path.startswith("file::memory:"):
+            return
+        try:
+            os.chmod(self._db_path, 0o600)
+        except OSError:
+            pass
+
+    def _require_open(self) -> sqlite3.Connection:
+        """Return the live connection or raise if the store has been closed."""
+        if self._conn is None:
+            raise EnovaError("UsageStore is closed")
+        return self._conn
 
     def __enter__(self) -> UsageStore:
         return self
@@ -112,19 +135,20 @@ class UsageStore:
         if not readings:
             return 0
 
+        conn = self._require_open()
         self._log.debug("Saving %d readings for meter %s", len(readings), meter_id)
         rows = []
         for r in readings:
             values = (
                 [meter_id, r.date.isoformat()]
-                + [r.hourly.get(k, 0.0) for k in HOUR_KEYS]
+                + [r.hourly.get(k) for k in HOUR_KEYS]
                 + [r.total_on_peak, r.total_mid_peak, r.total_off_peak, r.total]
             )
             rows.append(values)
 
         with self._lock:
-            self._conn.executemany(_INSERT, rows)
-            self._conn.commit()
+            conn.executemany(_INSERT, rows)
+            conn.commit()
         self._log.info("Saved %d readings to database", len(rows))
         return len(rows)
 
@@ -147,7 +171,7 @@ class UsageStore:
         query = "SELECT date, {cols} FROM usage WHERE meter_id = ?".format(
             cols=", ".join(DATA_COLS),
         )
-        params: list = [meter_id]
+        params: list[str] = [meter_id]
 
         if from_date is not None:
             query += " AND date >= ?"
@@ -158,8 +182,9 @@ class UsageStore:
 
         query += " ORDER BY date"
 
+        conn = self._require_open()
         with self._lock:
-            cursor = self._conn.execute(query, params)
+            cursor = conn.execute(query, params)
             rows = cursor.fetchall()
 
         readings: list[UsageReading] = []
@@ -187,8 +212,9 @@ class UsageStore:
         Returns:
             The latest date as a datetime.date, or None.
         """
+        conn = self._require_open()
         with self._lock:
-            cursor = self._conn.execute(
+            cursor = conn.execute(
                 "SELECT MAX(date) FROM usage WHERE meter_id = ?",
                 [meter_id],
             )
@@ -211,6 +237,7 @@ class UsageStore:
         if not rates:
             return 0
 
+        conn = self._require_open()
         self._log.debug("Saving %d tariff rates", len(rates))
         rows = []
         for r in rates:
@@ -226,8 +253,8 @@ class UsageStore:
             )
 
         with self._lock:
-            self._conn.executemany(_INSERT_TARIFF, rows)
-            self._conn.commit()
+            conn.executemany(_INSERT_TARIFF, rows)
+            conn.commit()
         self._log.info("Saved %d tariff rates to database", len(rows))
         return len(rows)
 
@@ -246,7 +273,7 @@ class UsageStore:
             List of TariffRate ordered by start_date, plan, name.
         """
         query = "SELECT start_date, end_date, plan, name, price, description FROM tariff WHERE 1=1"
-        params: list = []
+        params: list[str] = []
 
         if plan is not None:
             query += " AND plan = ?"
@@ -258,8 +285,9 @@ class UsageStore:
 
         query += " ORDER BY start_date, plan, name"
 
+        conn = self._require_open()
         with self._lock:
-            cursor = self._conn.execute(query, params)
+            cursor = conn.execute(query, params)
             rows = cursor.fetchall()
 
         return [
@@ -296,7 +324,7 @@ class UsageStore:
         self._log.info("Seeding database with %d months of data", months)
         readings = client.download_usage(from_date, to_date)
         if readings:
-            self.save(client.meter_id, readings)
+            self.save(_require_meter_id(client.meter_id), readings)
         self._log.info("Seeded %d readings", len(readings))
         return readings
 
@@ -314,7 +342,7 @@ class UsageStore:
         Raises:
             enova.client.EnovaError: If the client is not logged in.
         """
-        latest = self.latest_record_date(client.meter_id)
+        latest = self.latest_record_date(_require_meter_id(client.meter_id))
         if latest is None:
             self._log.info("No existing data, falling back to seed()")
             return self.seed(client)
@@ -331,7 +359,7 @@ class UsageStore:
         )
         readings = client.download_usage(from_date, to_date)
         if readings:
-            self.save(client.meter_id, readings)
+            self.save(_require_meter_id(client.meter_id), readings)
         self._log.info("Updated %d new readings", len(readings))
         return readings
 
@@ -352,7 +380,9 @@ class UsageStore:
         readings = await client.download_usage(from_date, to_date)
         if readings:
             loop = asyncio.get_running_loop()
-            await loop.run_in_executor(None, self.save, client.meter_id, readings)
+            await loop.run_in_executor(
+                None, self.save, _require_meter_id(client.meter_id), readings
+            )
         self._log.info("Async seeded %d readings", len(readings))
         return readings
 
@@ -366,7 +396,9 @@ class UsageStore:
             List of newly downloaded readings (may be empty).
         """
         loop = asyncio.get_running_loop()
-        latest = await loop.run_in_executor(None, self.latest_record_date, client.meter_id)
+        latest = await loop.run_in_executor(
+            None, self.latest_record_date, _require_meter_id(client.meter_id)
+        )
         if latest is None:
             self._log.info("No existing data, falling back to async_seed()")
             return await self.async_seed(client)
@@ -383,9 +415,18 @@ class UsageStore:
         )
         readings = await client.download_usage(from_date, to_date)
         if readings:
-            await loop.run_in_executor(None, self.save, client.meter_id, readings)
+            await loop.run_in_executor(
+                None, self.save, _require_meter_id(client.meter_id), readings
+            )
         self._log.info("Async updated %d new readings", len(readings))
         return readings
+
+
+def _require_meter_id(meter_id: str | None) -> str:
+    """Return a non-None meter_id or raise if the client isn't logged in."""
+    if meter_id is None:
+        raise EnovaError("Client has no meter_id; call login() first")
+    return meter_id
 
 
 def _months_ago(ref: date, months: int) -> date:

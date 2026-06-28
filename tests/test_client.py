@@ -1,16 +1,22 @@
 """Tests for parsers, exceptions, and the sync EnovaClient facade."""
 
-from datetime import date
+from datetime import date, datetime, timezone
 from unittest.mock import AsyncMock, patch
 
 import pytest
 
 from enovapower.client import EnovaClient
 from enovapower.exceptions import EnovaAuthError, EnovaError, EnovaNetworkError
-from enovapower.models import TariffRate, UsageReading
-from enovapower.parsers import parse_csv, parse_tariff_html
+from enovapower.models import GreenButtonInterval, TariffRate, UsageReading
+from enovapower.parsers import parse_csv, parse_green_button_xml, parse_tariff_html
 
-from .conftest import MINIMAL_CSV, MULTI_ROW_CSV, TARIFF_HTML
+from .conftest import (
+    GREEN_BUTTON_XML,
+    GREEN_BUTTON_XML_ENTITY_BOMB,
+    MINIMAL_CSV,
+    MULTI_ROW_CSV,
+    TARIFF_HTML,
+)
 
 # ---------------------------------------------------------------------------
 # parse_csv tests
@@ -99,6 +105,27 @@ class TestParseCsv:
         with pytest.raises(EnovaError, match="empty CSV"):
             parse_csv("   \n  ")
 
+    def test_parse_csv_raises_on_invalid_date(self):
+        """A non-ISO reading date raises EnovaError (not a bare ValueError)."""
+        bad = MINIMAL_CSV.replace("2026-03-01", "March 1st")
+        with pytest.raises(EnovaError, match="Invalid reading date"):
+            parse_csv(bad)
+
+    def test_parse_csv_missing_hour_is_none_not_zero(self):
+        """An empty hourly cell parses to None, distinct from a real 0.0."""
+        # Blank out the 2 am column (h02) for the single data row.
+        rows = MINIMAL_CSV.rstrip("\n").split("\n")
+        cells = rows[1].split(",")
+        cells[2] = '""'  # h02
+        rows[1] = ",".join(cells)
+        readings = parse_csv("\n".join(rows) + "\n")
+        r = readings[0]
+        assert r.hourly["h02"] is None
+        assert r.hourly["h01"] == 1.0
+        # total ignores the missing hour rather than counting it as zero
+        present = [v for v in r.hourly.values() if v is not None]
+        assert r.total == pytest.approx(sum(present))
+
 
 # ---------------------------------------------------------------------------
 # parse_tariff_html tests
@@ -162,6 +189,64 @@ class TestParseTariffHtml:
     def test_returns_tariff_rate_objects(self):
         rates = parse_tariff_html(TARIFF_HTML)
         assert all(isinstance(r, TariffRate) for r in rates)
+
+    def test_invalid_heading_date_raises(self):
+        # Matches the heading regex (2-digit day) but is not a real month.
+        bad = TARIFF_HTML.replace("Nov 01, 2025", "Xyz 01, 2025")
+        with pytest.raises(EnovaError, match="Invalid tariff heading date"):
+            parse_tariff_html(bad)
+
+
+# ---------------------------------------------------------------------------
+# parse_green_button_xml tests
+# ---------------------------------------------------------------------------
+
+class TestParseGreenButtonXml:
+    def test_parses_intervals(self):
+        intervals = parse_green_button_xml(GREEN_BUTTON_XML)
+        assert len(intervals) == 2
+        assert all(isinstance(i, GreenButtonInterval) for i in intervals)
+
+    def test_sorted_by_start(self):
+        intervals = parse_green_button_xml(GREEN_BUTTON_XML)
+        assert intervals[0].start < intervals[1].start
+
+    def test_values_converted_to_kwh(self):
+        # multiplier 0, uom Wh: 1500 Wh -> 1.5 kWh, 2500 Wh -> 2.5 kWh
+        intervals = parse_green_button_xml(GREEN_BUTTON_XML)
+        assert intervals[0].kwh == pytest.approx(1.5)
+        assert intervals[1].kwh == pytest.approx(2.5)
+
+    def test_start_is_utc_aware(self):
+        intervals = parse_green_button_xml(GREEN_BUTTON_XML)
+        first = intervals[0]
+        assert first.start.tzinfo == timezone.utc
+        assert first.start == datetime.fromtimestamp(1740808800, tz=timezone.utc)
+        assert first.duration == 3600
+
+    def test_multiplier_scaling(self):
+        # powerOfTenMultiplier 3 means raw value is in kWh-thousandths of...
+        # actual Wh = value * 10^3, so 2 -> 2000 Wh -> 2.0 kWh
+        xml = GREEN_BUTTON_XML.replace(
+            "<powerOfTenMultiplier>0</powerOfTenMultiplier>",
+            "<powerOfTenMultiplier>3</powerOfTenMultiplier>",
+        ).replace("<value>1500</value>", "<value>2</value>")
+        intervals = parse_green_button_xml(xml)
+        # the 2-value interval (start 1740808800) is first after sorting
+        assert intervals[0].kwh == pytest.approx(2.0)
+
+    def test_empty_raises(self):
+        with pytest.raises(EnovaError, match="empty Green Button"):
+            parse_green_button_xml("")
+
+    def test_malformed_raises(self):
+        with pytest.raises(EnovaError, match="Invalid Green Button XML"):
+            parse_green_button_xml("<feed><unclosed>")
+
+    def test_entity_expansion_refused(self):
+        """defusedxml must refuse DTD entity expansion (billion laughs)."""
+        with pytest.raises(EnovaError):
+            parse_green_button_xml(GREEN_BUTTON_XML_ENTITY_BOMB)
 
 
 # ---------------------------------------------------------------------------
@@ -300,6 +385,53 @@ class TestUsageReadingModel:
         reading = UsageReading(date=date(2026, 1, 1), total=24.5)
         assert "2026-01-01" in repr(reading)
         assert "24.50 kWh" in repr(reading)
+
+    def test_post_init_total_ignores_missing_hours(self):
+        """None hours are treated as absent, not zero, when computing total."""
+        hourly = {f"h{i:02d}": 1.0 for i in range(1, 25)}
+        hourly["h05"] = None
+        reading = UsageReading(date=date(2026, 1, 1), hourly=hourly)
+        assert reading.total == 23.0
+
+
+class TestUsageReadingIntervals:
+    def test_returns_24_utc_aware_pairs(self):
+        from datetime import timezone
+
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 1, 15), hourly=hourly)
+        intervals = reading.intervals()
+        assert len(intervals) == 24
+        for start, _ in intervals:
+            assert start.tzinfo == timezone.utc
+
+    def test_hour_start_mapping_est_to_utc(self):
+        """h01 covers 00:00 EST (= 05:00 UTC); h24 covers 23:00 EST."""
+        from datetime import datetime, timezone
+
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 1, 15), hourly=hourly)
+        intervals = reading.intervals()
+        # h01 → 2026-01-15 00:00 EST → 05:00 UTC, value 1.0
+        assert intervals[0] == (datetime(2026, 1, 15, 5, tzinfo=timezone.utc), 1.0)
+        # h24 → 2026-01-15 23:00 EST → 2026-01-16 04:00 UTC, value 24.0
+        assert intervals[23] == (datetime(2026, 1, 16, 4, tzinfo=timezone.utc), 24.0)
+
+    def test_missing_hour_yields_none(self):
+        hourly = {f"h{i:02d}": 1.0 for i in range(1, 25)}
+        hourly["h03"] = None
+        reading = UsageReading(date=date(2026, 1, 15), hourly=hourly)
+        values = [kwh for _, kwh in reading.intervals()]
+        assert values[2] is None
+
+    def test_custom_timezone(self):
+        from datetime import timedelta, timezone
+
+        eastern_standard = timezone(timedelta(hours=-5))
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 1, 15), hourly=hourly)
+        start, _ = reading.intervals(tz=eastern_standard)[0]
+        assert start.hour == 0  # midnight local EST
 
 
 class TestTariffRateModel:

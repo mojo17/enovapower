@@ -90,6 +90,7 @@ def _mock_aiohttp_response(text="", url="https://myaccount.enovapower.com/app/ca
     resp.url = url
     resp.ok = status < 400
     resp.status = status
+    resp.content_length = len(text.encode("utf-8"))
     # raise_for_status is synchronous in aiohttp, so always use MagicMock
     if status >= 400:
         resp.raise_for_status = MagicMock(
@@ -529,6 +530,45 @@ class TestAsyncGetLatestUsage:
 
         assert result is None
 
+    async def test_returns_max_date_regardless_of_order(self):
+        """Latest is chosen by date, not list position."""
+        client = AsyncEnovaClient()
+        client._meter_id = "111111"
+        out_of_order = [
+            UsageReading(date=date(2026, 3, 3), total=1.0),
+            UsageReading(date=date(2026, 3, 5), total=2.0),  # newest, middle
+            UsageReading(date=date(2026, 3, 4), total=3.0),
+        ]
+        with patch.object(client, "download_usage", new_callable=AsyncMock) as mock_dl:
+            mock_dl.return_value = out_of_order
+            result = await client.get_latest_usage()
+
+        assert result is not None
+        assert result.date == date(2026, 3, 5)
+
+
+# ---------------------------------------------------------------------------
+# Response size cap
+# ---------------------------------------------------------------------------
+
+class TestResponseSizeCap:
+    async def test_oversize_content_length_rejected(self):
+        from enovapower.async_client import _MAX_RESPONSE_BYTES
+
+        resp = _mock_aiohttp_response(text="ok")
+        resp.content_length = _MAX_RESPONSE_BYTES + 1
+        session = _make_session(resp)
+        client = AsyncEnovaClient(session=session, retries=0)
+        with pytest.raises(EnovaNetworkError, match="too large"):
+            await client._request("GET", f"{BASE_URL}/app/capricorn")
+
+    async def test_normal_size_allowed(self):
+        resp = _mock_aiohttp_response(text="ok")
+        session = _make_session(resp)
+        client = AsyncEnovaClient(session=session, retries=0)
+        text, _ = await client._request("GET", f"{BASE_URL}/app/capricorn")
+        assert text == "ok"
+
 
 # ---------------------------------------------------------------------------
 # AsyncEnovaClient context manager & close tests
@@ -865,3 +905,108 @@ class TestClearCredentials:
         client.clear_credentials()
         assert client._access_code is None
         assert client._password is None
+
+
+class TestReauthCallback:
+    async def test_relogin_uses_callback(self):
+        async def cb():
+            return ("cb_user", "cb_pass")
+
+        client = AsyncEnovaClient(reauth_callback=cb)
+        with patch.object(client, "login", new_callable=AsyncMock) as mock_login:
+            await client._relogin()
+            mock_login.assert_awaited_once_with("cb_user", "cb_pass")
+
+    async def test_callback_failure_raises_session_expired(self):
+        async def cb():
+            return ("u", "p")
+
+        client = AsyncEnovaClient(reauth_callback=cb)
+        with patch.object(
+            client, "login", new_callable=AsyncMock, side_effect=EnovaAuthError("bad")
+        ):
+            with pytest.raises(EnovaSessionExpiredError):
+                await client._relogin()
+
+    async def test_stored_credentials_used_without_callback(self):
+        client = AsyncEnovaClient()
+        client._access_code = "stored_user"
+        client._password = "stored_pass"
+        with patch.object(client, "login", new_callable=AsyncMock) as mock_login:
+            await client._relogin()
+            mock_login.assert_awaited_once_with("stored_user", "stored_pass")
+
+    async def test_no_reauth_source_raises(self):
+        client = AsyncEnovaClient()
+        with pytest.raises(EnovaSessionExpiredError):
+            await client._relogin()
+
+
+class TestReloginSerialization:
+    async def test_concurrent_expiry_relogins_once(self):
+        import asyncio
+
+        client = AsyncEnovaClient()
+        ok = "https://myaccount.enovapower.com/app/capricorn"
+        calls = {"n": 0}
+
+        async def fake_request(method, url, *, error_msg="Request failed", **kwargs):
+            calls["n"] += 1
+            # The first request from each of the two coroutines sees expiry.
+            return ("body", EXPIRED_URL if calls["n"] <= 2 else ok)
+
+        async def fake_relogin():
+            await asyncio.sleep(0.01)
+            client._login_generation += 1
+
+        with (
+            patch.object(client, "_request", side_effect=fake_request),
+            patch.object(client, "_relogin", side_effect=fake_relogin) as mock_relogin,
+        ):
+            await asyncio.gather(
+                client._request_with_relogin("GET", ok),
+                client._request_with_relogin("GET", ok),
+            )
+
+        mock_relogin.assert_awaited_once()
+
+
+class TestMultiMeter:
+    async def test_extracts_multiple_meters_from_select(self):
+        from bs4 import BeautifulSoup
+
+        multi = (
+            "<html><body><select name='selectedMeterId'>"
+            "<option value='111111'>Meter A</option>"
+            "<option value='222222'>Meter B</option>"
+            "</select></body></html>"
+        )
+        resp = _mock_aiohttp_response(text=multi)
+        session = _make_session(resp)
+        client = AsyncEnovaClient(session=session)
+        soup = BeautifulSoup(DASHBOARD_HTML_NO_METER, "html.parser")
+        await client._extract_account_info(soup)
+        assert client.meter_ids == ["111111", "222222"]
+        assert client.meter_id == "111111"
+
+    async def test_single_meter_populates_meter_ids(self):
+        from bs4 import BeautifulSoup
+
+        session = AsyncMock(spec=aiohttp.ClientSession)
+        client = AsyncEnovaClient(session=session)
+        soup = BeautifulSoup(DASHBOARD_HTML, "html.parser")
+        await client._extract_account_info(soup)
+        assert client.meter_ids == ["111111"]
+
+    def test_select_meter_switches_active(self):
+        client = AsyncEnovaClient()
+        client._meter_ids = ["111111", "222222"]
+        client._meter_id = "111111"
+        client.select_meter("222222")
+        assert client.meter_id == "222222"
+
+    def test_select_unknown_meter_raises(self):
+        client = AsyncEnovaClient()
+        client._meter_ids = ["111111"]
+        with pytest.raises(EnovaError, match="Unknown meter_id"):
+            client.select_meter("999999")

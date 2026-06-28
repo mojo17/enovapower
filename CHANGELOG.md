@@ -1,5 +1,50 @@
 # Changelog
 
+## 0.5.0
+
+### Added
+
+- `UsageReading.intervals()` returns hourly values as `(interval_start, kWh)`
+  pairs with **timezone-aware** timestamps (UTC by default, configurable),
+  mapping each hour from fixed Eastern Standard Time. This is the recommended
+  way to feed a time-series store or the Home Assistant statistics engine.
+- `EASTERN_STANDARD` timezone constant documenting the portal's fixed-offset
+  (UTC-5, no DST) time basis.
+- `parse_green_button_xml()` parses Green Button (ESPI) XML exports into
+  `GreenButtonInterval` objects (UTC start, duration, kWh), using `defusedxml`
+  for safe parsing.
+- Multi-meter support: `meter_ids` property lists every meter on the account
+  and `select_meter()` switches the active meter (both clients).
+- `reauth_callback` parameter on `AsyncEnovaClient` to drive re-authentication
+  through caller-supplied credentials instead of retaining a password.
+
+### Changed
+
+- Re-login on session expiry is now serialized (an `asyncio.Lock` plus a login
+  generation counter), so concurrent expired requests don't all re-authenticate.
+
+- **Missing vs. zero:** an hour the portal does not report now parses to
+  `None` instead of `0.0`, so genuine gaps are distinguishable from real
+  zero-consumption hours. `UsageReading.hourly` is now typed
+  `dict[str, float | None]`, `total` sums only present hours, and the SQLite
+  store persists missing hours as `NULL`.
+- `parse_csv` now raises `EnovaError` (instead of a bare `ValueError`) on an
+  unparseable reading date; tariff parsing does the same for heading dates.
+- `get_latest_usage()` selects the most recent reading by date rather than by
+  list position.
+- Minimum `aiohttp` raised to `>=3.10.11` to clear known client-side CVEs.
+
+### Security
+
+- `UsageStore` restricts its database file to owner-only (`0600`) — hourly
+  usage reveals household occupancy patterns.
+- HTTP responses are capped at 64 MB to bound memory against a misbehaving or
+  spoofed endpoint.
+- `meter_id` is no longer logged at INFO (moved to DEBUG).
+- Green Button XML is parsed with `defusedxml`, blocking entity-expansion attacks.
+- CI now runs `pip-audit` and `mypy --strict`; added Dependabot for dependencies
+  and Actions. The package now type-checks clean under `mypy --strict`.
+
 ## 0.4.0
 
 ### Added

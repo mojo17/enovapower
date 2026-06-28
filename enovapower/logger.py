@@ -63,8 +63,8 @@ def configure_logging(
         handler.setFormatter(formatter)
         handlers = [handler]
 
-    for handler in handlers:
-        if handler not in logger.handlers:
-            logger.addHandler(handler)
+    for h in handlers:
+        if h not in logger.handlers:
+            logger.addHandler(h)
 
     return logger

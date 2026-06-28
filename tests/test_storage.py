@@ -1,11 +1,14 @@
 """Tests for the Enova Power SQLite storage layer."""
 
+import os
+import stat
 import threading
 from datetime import date
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
 
+from enovapower.exceptions import EnovaError
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv
 from enovapower.storage import UsageStore, _months_ago
@@ -63,6 +66,19 @@ class TestStoreInit:
         with UsageStore(db_path) as store:
             readings = store.load(METER_ID)
             assert len(readings) == 1
+
+    @pytest.mark.skipif(os.name == "nt", reason="POSIX permission bits")
+    def test_db_file_is_owner_only(self, tmp_path):
+        db_path = tmp_path / "perms.db"
+        with UsageStore(db_path):
+            mode = stat.S_IMODE(os.stat(db_path).st_mode)
+            assert mode == 0o600
+
+    def test_use_after_close_raises(self):
+        store = UsageStore(":memory:")
+        store.close()
+        with pytest.raises(EnovaError, match="closed"):
+            store.load(METER_ID)
 
 
 # ---------------------------------------------------------------------------
@@ -135,6 +151,17 @@ class TestSaveLoad:
             readings = store.load(METER_ID)
             assert isinstance(readings[0], UsageReading)
             assert len(readings[0].hourly) == 24
+
+    def test_missing_hour_round_trips_as_none(self):
+        """A None hour is stored as NULL and read back as None, not 0.0."""
+        hourly = {f"h{i:02d}": 1.0 for i in range(1, 25)}
+        hourly["h07"] = None
+        reading = UsageReading(date=date(2026, 3, 1), hourly=hourly)
+        with UsageStore(":memory:") as store:
+            store.save(METER_ID, [reading])
+            loaded = store.load(METER_ID)
+        assert loaded[0].hourly["h07"] is None
+        assert loaded[0].hourly["h06"] == 1.0
 
 
 # ---------------------------------------------------------------------------

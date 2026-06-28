@@ -42,6 +42,38 @@ MULTI_ROW_CSV = (
     '"0.63","1.08","0.82","0.78","0.62","0.64","0.91","4.09","3.09","9.03"\n'
 )
 
+GREEN_BUTTON_XML = (
+    '<?xml version="1.0" encoding="UTF-8"?>'
+    '<feed xmlns="http://www.w3.org/2005/Atom">'
+    "<entry><content>"
+    '<ReadingType xmlns="http://naesb.org/espi">'
+    "<powerOfTenMultiplier>0</powerOfTenMultiplier>"
+    "<uom>72</uom>"  # 72 = watt-hours
+    "</ReadingType>"
+    "</content></entry>"
+    "<entry><content>"
+    '<IntervalBlock xmlns="http://naesb.org/espi">'
+    # Deliberately out of order to exercise sorting.
+    "<IntervalReading>"
+    "<timePeriod><duration>3600</duration><start>1740812400</start></timePeriod>"
+    "<value>2500</value>"
+    "</IntervalReading>"
+    "<IntervalReading>"
+    "<timePeriod><duration>3600</duration><start>1740808800</start></timePeriod>"
+    "<value>1500</value>"
+    "</IntervalReading>"
+    "</IntervalBlock>"
+    "</content></entry>"
+    "</feed>"
+)
+
+# Billion-laughs-style entity expansion; defusedxml must refuse to parse this.
+GREEN_BUTTON_XML_ENTITY_BOMB = (
+    '<?xml version="1.0"?>'
+    '<!DOCTYPE feed [ <!ENTITY a "AAAAAAAAAA"> ]>'
+    "<feed>&a;</feed>"
+)
+
 TARIFF_HTML = (
     "<html><body>"
     "<h5><strong>Ultra-Low Overnight Pricing:"

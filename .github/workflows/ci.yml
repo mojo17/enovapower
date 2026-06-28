@@ -27,5 +27,24 @@ jobs:
       - name: Lint
         run: ruff check enovapower/ tests/
 
+      - name: Type check
+        run: mypy
+
       - name: Test
         run: pytest tests/ -v
+
+  audit:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+
+      - name: Set up Python
+        uses: actions/setup-python@v5
+        with:
+          python-version: "3.12"
+
+      - name: Install dependencies
+        run: pip install -e ".[dev]" pip-audit
+
+      - name: Audit dependencies for known vulnerabilities
+        run: pip-audit --strict

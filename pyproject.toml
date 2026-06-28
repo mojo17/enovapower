@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enovapower"
-version = "0.4.0"
+version = "0.5.0"
 description = "Python client for downloading electricity usage data from Enova Power"
 readme = "README.md"
 license = "Apache-2.0"
@@ -26,7 +26,11 @@ classifiers = [
 ]
 dependencies = [
     "beautifulsoup4>=4.12",
-    "aiohttp>=3.9",
+    # 3.10.11 is the first release clear of the client-relevant CVEs in the
+    # 3.9.x / early-3.10 line (request-smuggling-class parsing fixes).
+    "aiohttp>=3.10.11",
+    # Safe XML parsing for Green Button exports (guards entity-expansion).
+    "defusedxml>=0.7",
 ]
 
 [project.optional-dependencies]
@@ -34,6 +38,7 @@ dev = [
     "pytest>=8.0",
     "pytest-asyncio>=0.23",
     "ruff>=0.4",
+    "mypy>=1.8",
 ]
 
 [project.urls]
@@ -54,3 +59,11 @@ select = ["E", "F", "I", "W"]
 [tool.pytest.ini_options]
 testpaths = ["tests"]
 asyncio_mode = "auto"
+
+[tool.mypy]
+files = ["enovapower"]
+strict = true
+
+[[tool.mypy.overrides]]
+module = "defusedxml.*"
+ignore_missing_imports = true

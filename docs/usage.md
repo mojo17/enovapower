@@ -84,7 +84,7 @@ for r in readings:
 
 ### Green Button XML
 
-To get the raw Green Button XML export instead:
+To get the raw Green Button XML export:
 
 ```python
 xml_data = client.download_usage_xml(
@@ -93,6 +93,21 @@ xml_data = client.download_usage_xml(
 )
 print(xml_data[:200])  # raw XML string
 ```
+
+Or parse it into interval readings with `parse_green_button_xml()`:
+
+```python
+from enovapower import parse_green_button_xml
+
+intervals = parse_green_button_xml(xml_data)
+for iv in intervals:
+    print(f"{iv.start.isoformat()}  {iv.kwh} kWh ({iv.duration}s)")
+```
+
+Each `GreenButtonInterval` has a timezone-aware UTC `start`, a `duration` in
+seconds, and `kwh`. Values are scaled by the feed's `powerOfTenMultiplier` and
+converted to kWh assuming the standard electricity unit (watt-hours). The XML is
+parsed with `defusedxml`, so malicious entity-expansion payloads are rejected.
 
 ### Long Date Ranges
 
@@ -116,6 +131,31 @@ To get just the most recent day's data:
 latest = client.get_latest_usage()
 if latest:
     print(f"{latest.date}: {latest.total} kWh")
+```
+
+### Hourly Intervals (timezone-aware)
+
+`UsageReading.hourly` is keyed `h01`–`h24`, but those keys carry no timezone.
+For anything time-series — a database, a chart, or the Home Assistant statistics
+engine — use `intervals()`, which yields `(interval_start, kWh)` pairs as
+timezone-aware datetimes:
+
+```python
+for reading in readings:
+    for start, kwh in reading.intervals():   # UTC by default
+        if kwh is not None:                  # None = no data reported for that hour
+            print(f"{start.isoformat()}  {kwh} kWh")
+```
+
+Each value maps to an **hour-starting** timestamp in fixed Eastern Standard Time
+(UTC-5, no daylight saving): `h01` covers 00:00–01:00, … `h24` covers 23:00–00:00.
+Because the portal reports in fixed standard time, every day has exactly 24 hours
+and there are no missing/duplicated hours on DST-transition days. Pass `tz=` to
+convert to another timezone:
+
+```python
+from zoneinfo import ZoneInfo
+reading.intervals(tz=ZoneInfo("America/Toronto"))
 ```
 
 ---
@@ -297,13 +337,18 @@ Returned by `download_usage()`, `parse_csv()`, and `store.load()`.
 | Field | Type | Description |
 |---|---|---|
 | `date` | `date` | Reading date |
-| `hourly` | `dict[str, float]` | Hourly kWh values keyed `h01` through `h24` (1 AM through midnight) |
+| `hourly` | `dict[str, float \| None]` | Hourly kWh values keyed `h01` through `h24` (1 AM through midnight). `None` means the portal reported no data for that hour — distinct from a real `0.0`. |
 | `total_on_peak` | `float` | Total on-peak kWh for the day |
 | `total_mid_peak` | `float` | Total mid-peak kWh for the day |
 | `total_off_peak` | `float` | Total off-peak kWh for the day |
-| `total` | `float` | Sum of all hourly values |
+| `total` | `float` | Sum of all **present** hourly values (`None` hours ignored) |
 
-Ontario's electricity system operates in Eastern Standard Time, so during Daylight Saving Time the values may differ slightly from billed amounts.
+**Method:** `intervals(tz=timezone.utc) -> list[tuple[datetime, float | None]]` — hourly
+values as timezone-aware `(interval_start, kWh)` pairs (see [Hourly Intervals](#hourly-intervals-timezone-aware)).
+
+Enova reports interval data in fixed Eastern Standard Time (UTC-5) year-round, so each day
+always has exactly 24 hourly values. Use `intervals()` to get correct UTC timestamps rather
+than mapping the `h01`–`h24` keys yourself.
 
 ### TariffRate
 
@@ -346,8 +391,8 @@ except EnovaError as e:
 | Exception | When |
 |---|---|
 | `EnovaAuthError` | Login credentials are wrong, CSRF token missing, or session redirect to login page |
-| `EnovaNetworkError` | Network failure or timeout reaching the portal |
-| `EnovaError` | Date range invalid, not logged in, download form not found, or XML/tariff range exceeds 90 days |
+| `EnovaNetworkError` | Network failure, timeout, or an oversized response from the portal |
+| `EnovaError` | Date range invalid, not logged in, download form not found, unparseable CSV/date, `UsageStore` used after close, or XML/tariff range exceeds 90 days |
 
 All exceptions inherit from `EnovaError`, so catching `EnovaError` handles all cases.
 
@@ -423,4 +468,31 @@ logger = get_logger()
 - **No public API**: The portal does not expose a REST API. This library scrapes the web forms, so it may break if the portal HTML changes.
 - **90-day limit per request**: The portal enforces a maximum of 90 days per download. `download_usage()` automatically handles this.
 - **Session-based auth**: Sessions expire after inactivity. There is no token refresh — the client will automatically re-authenticate if you pass credentials to `login()`.
-- **Single meter**: The library currently uses the first meter ID found on the account. Multi-meter accounts are not yet supported.
+- **Multi-meter**: `meter_id` defaults to the first meter found on the account. For
+  accounts with several meters, list them with `client.meter_ids` and switch the active
+  meter with `client.select_meter("<id>")` before downloading.
+
+## Multiple Meters
+
+```python
+client.login("user@example.com", "your_password")
+print(client.meter_ids)        # e.g. ["111111", "222222"]
+client.select_meter("222222")  # subsequent downloads use this meter
+```
+
+## Re-authentication Callback
+
+By default the client retains your credentials in memory to re-login when the
+session expires. To avoid retaining a password — for example in a long-running
+integration that stores credentials elsewhere — pass a `reauth_callback` that
+returns fresh `(access_code, password)` on demand:
+
+```python
+async def get_credentials() -> tuple[str, str]:
+    return load_username(), load_password()  # from your own secret store
+
+client = AsyncEnovaClient(reauth_callback=get_credentials)
+```
+
+When a session expires, the callback is invoked to re-authenticate. Concurrent
+expired requests are serialized so only one re-login happens.
