@@ -113,15 +113,19 @@ class EnovaClient:
         self,
         from_date: date,
         to_date: date,
+        *,
+        meter_id: str | None = None,
     ) -> list[UsageReading]:
-        return self._run(self._async.download_usage(from_date, to_date))
+        return self._run(self._async.download_usage(from_date, to_date, meter_id=meter_id))
 
     def download_usage_xml(
         self,
         from_date: date,
         to_date: date,
+        *,
+        meter_id: str | None = None,
     ) -> str:
-        return self._run(self._async.download_usage_xml(from_date, to_date))
+        return self._run(self._async.download_usage_xml(from_date, to_date, meter_id=meter_id))
 
     def download_tariff(
         self,
@@ -130,5 +134,5 @@ class EnovaClient:
     ) -> list[TariffRate]:
         return self._run(self._async.download_tariff(from_date, to_date))
 
-    def get_latest_usage(self) -> UsageReading | None:
-        return self._run(self._async.get_latest_usage())
+    def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
+        return self._run(self._async.get_latest_usage(meter_id=meter_id))

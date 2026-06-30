@@ -270,7 +270,9 @@ class TestSyncFacade:
             client._async, "download_usage", new_callable=AsyncMock, return_value=readings
         ) as mock_dl:
             result = client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
-            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
+            mock_dl.assert_awaited_once_with(
+                date(2026, 3, 1), date(2026, 3, 1), meter_id=None
+            )
             assert result == readings
         client.close()
 
@@ -281,7 +283,9 @@ class TestSyncFacade:
             new_callable=AsyncMock, return_value="<xml/>",
         ) as mock_dl:
             result = client.download_usage_xml(date(2026, 3, 1), date(2026, 3, 1))
-            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 1))
+            mock_dl.assert_awaited_once_with(
+                date(2026, 3, 1), date(2026, 3, 1), meter_id=None
+            )
             assert result == "<xml/>"
         client.close()
 
@@ -295,7 +299,9 @@ class TestSyncFacade:
             result = client.download_usage(
                 date(2026, 3, 1), date(2026, 3, 10)
             )
-            mock_dl.assert_awaited_once_with(date(2026, 3, 1), date(2026, 3, 10))
+            mock_dl.assert_awaited_once_with(
+                date(2026, 3, 1), date(2026, 3, 10), meter_id=None
+            )
             assert result == readings
         client.close()
 

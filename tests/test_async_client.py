@@ -324,7 +324,9 @@ class TestAsyncDownloadUsage:
         with patch.object(client, "_download_usage_chunked", new_callable=AsyncMock) as mock_chunk:
             mock_chunk.return_value = []
             await client.download_usage(date(2026, 1, 1), date(2026, 7, 1))
-        mock_chunk.assert_called_once_with(date(2026, 1, 1), date(2026, 7, 1))
+        mock_chunk.assert_called_once_with(
+            date(2026, 1, 1), date(2026, 7, 1), meter_id="111111"
+        )
 
     async def test_from_date_after_to_date(self):
         session = AsyncMock(spec=aiohttp.ClientSession)
@@ -348,6 +350,29 @@ class TestAsyncDownloadUsage:
         assert isinstance(result, list)
         assert len(result) == 1
         assert isinstance(result[0], UsageReading)
+
+    async def test_download_usage_defaults_to_active_meter(self):
+        form_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
+        csv_resp = _mock_aiohttp_response(text=MINIMAL_CSV)
+        session = _make_session(form_resp, csv_resp)
+        client = self._make_client(session, meter_id="111111")
+
+        await client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+        form_data = session.request.call_args_list[0].kwargs["data"]
+        assert form_data["selectedMeterId"] == "111111"
+
+    async def test_download_usage_explicit_meter_id_targets_it(self):
+        form_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML)
+        csv_resp = _mock_aiohttp_response(text=MINIMAL_CSV)
+        session = _make_session(form_resp, csv_resp)
+        client = self._make_client(session, meter_id="111111")
+        client._meter_ids = ["111111", "222222"]
+
+        await client.download_usage(date(2026, 3, 1), date(2026, 3, 1), meter_id="222222")
+        form_data = session.request.call_args_list[0].kwargs["data"]
+        assert form_data["selectedMeterId"] == "222222"
+        # per-call meter_id must NOT mutate the active meter
+        assert client.meter_id == "111111"
 
     async def test_csv_download_full_url_in_form(self):
         form_resp = _mock_aiohttp_response(text=CSV_DOWNLOAD_RESPONSE_HTML_FULL_URL)

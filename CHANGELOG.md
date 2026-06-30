@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.6.0
+
+### Added
+
+- Per-call `meter_id` parameter on `download_usage`, `download_usage_xml`, and
+  `get_latest_usage` (both clients). Defaults to the active meter, so
+  single-meter usage is unchanged; multi-meter callers can target a specific
+  meter from `meter_ids` for one call without mutating the active meter via
+  `select_meter()`.
+
+### Notes
+
+- Multi-meter **discovery** (parsing a `<select name="selectedMeterId">`) remains
+  **speculative** — unverified against a real multi-meter account. The
+  multi-meter API itself (`meter_ids` / `select_meter` / per-call `meter_id`) is
+  stable; only the scraping that populates `meter_ids` may change.
+
 ## 0.5.1
 
 ### Security

@@ -359,6 +359,15 @@ class AsyncEnovaClient:
 
         Populates :attr:`meter_ids` with every meter found and sets the active
         :attr:`meter_id` to the first. Use :meth:`select_meter` to switch.
+
+        NOTE: Single-meter discovery (the ``refresh_btn`` href, and the single
+        ``selectedMeterId`` input fallback) is verified. **Multi-meter** discovery
+        (the ``<select>`` branch in :meth:`_extract_meter_ids_from_form`) is
+        SPECULATIVE — it has not been validated against a real multi-meter
+        account's markup. The downstream multi-meter API (``meter_ids``,
+        ``select_meter``, per-call ``meter_id=``) is sound regardless; only the
+        scraping that *populates* ``meter_ids`` may need adjusting once a real
+        multi-meter page is available.
         """
         meter_ids: list[str] = []
 
@@ -395,7 +404,13 @@ class AsyncEnovaClient:
 
     @staticmethod
     def _extract_meter_ids_from_form(soup: BeautifulSoup) -> list[str]:
-        """Collect meter IDs from a meter ``<select>`` or single hidden input."""
+        """Collect meter IDs from a meter ``<select>`` or single hidden input.
+
+        SPECULATIVE: the ``<select name="selectedMeterId">`` multi-option branch
+        is a best guess at how the portal lists multiple meters and has not been
+        confirmed against a real multi-meter account. The single-``<input>``
+        fallback is the verified single-meter path.
+        """
         meter_ids: list[str] = []
         select = soup.find("select", {"name": "selectedMeterId"})
         if select:
@@ -480,14 +495,17 @@ class AsyncEnovaClient:
         return text, resp_url
 
     def _build_form_data(
-        self, from_date: date, to_date: date, *, csv_download: bool = True
+        self,
+        from_date: date,
+        to_date: date,
+        *,
+        csv_download: bool = True,
+        meter_id: str,
     ) -> dict[str, str]:
         """Build the form data dict for a Green Button download request.
 
-        Callers must validate login state first (``_validate_download_params``),
-        which guarantees ``_meter_id`` is set.
+        ``meter_id`` is the resolved target meter (see :meth:`_resolve_meter_id`).
         """
-        assert self._meter_id is not None
         return {
             "para": "greenButtonDownloadV3",
             "GB_iso_fromDate": from_date.isoformat(),
@@ -504,7 +522,7 @@ class AsyncEnovaClient:
             "userAction": "",
             "tab": "GBDMD",
             "inquiryType": "electric",
-            "selectedMeterId": self._meter_id,
+            "selectedMeterId": meter_id,
             "hourlyOrDaily": "Hourly",
         }
 
@@ -515,10 +533,25 @@ class AsyncEnovaClient:
         if not self._meter_id:
             raise EnovaError("Not logged in or meter ID not found. Call login() first.")
 
+    def _resolve_meter_id(self, meter_id: str | None) -> str:
+        """Return the meter id to use for a request.
+
+        Single-meter callers omit ``meter_id`` and get the meter resolved at
+        login (the active :attr:`meter_id`). Multi-meter callers pass a specific
+        id from :attr:`meter_ids` to target it for this call only, without
+        mutating the active meter via :meth:`select_meter`.
+        """
+        resolved = meter_id or self._meter_id
+        if not resolved:
+            raise EnovaError("Not logged in or meter ID not found. Call login() first.")
+        return resolved
+
     async def download_usage(
         self,
         from_date: date,
         to_date: date,
+        *,
+        meter_id: str | None = None,
     ) -> list[UsageReading]:
         """Download smart meter usage data for a date range.
 
@@ -530,6 +563,9 @@ class AsyncEnovaClient:
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
+            meter_id: Optional meter to fetch. Defaults to the active meter
+                (the one resolved at login); pass an id from :attr:`meter_ids`
+                to target a specific meter on a multi-meter account.
 
         Returns:
             List of UsageReading with hourly kWh and TOU totals.
@@ -540,13 +576,16 @@ class AsyncEnovaClient:
             EnovaNetworkError: On network failure.
         """
         self._validate_download_params(from_date, to_date)
+        meter_id = self._resolve_meter_id(meter_id)
 
         if (to_date - from_date).days > MAX_RANGE_DAYS:
-            return await self._download_usage_chunked(from_date, to_date)
+            return await self._download_usage_chunked(from_date, to_date, meter_id=meter_id)
 
         self._log.info("Downloading usage: %s to %s", from_date.isoformat(), to_date.isoformat())
 
-        form_data = self._build_form_data(from_date, to_date, csv_download=True)
+        form_data = self._build_form_data(
+            from_date, to_date, csv_download=True, meter_id=meter_id
+        )
 
         text, resp_url = await self._request_with_relogin(
             "POST",
@@ -580,6 +619,8 @@ class AsyncEnovaClient:
         self,
         from_date: date,
         to_date: date,
+        *,
+        meter_id: str | None = None,
     ) -> str:
         """Download smart meter usage data as Green Button XML.
 
@@ -588,6 +629,8 @@ class AsyncEnovaClient:
         Args:
             from_date: Start date (inclusive).
             to_date: End date (inclusive).
+            meter_id: Optional meter to fetch. Defaults to the active meter;
+                pass an id from :attr:`meter_ids` to target a specific meter.
 
         Returns:
             Raw Green Button XML string.
@@ -600,11 +643,14 @@ class AsyncEnovaClient:
         if (to_date - from_date).days > MAX_RANGE_DAYS:
             raise EnovaError(f"Date range cannot exceed {MAX_RANGE_DAYS} days for XML download.")
         self._validate_download_params(from_date, to_date)
+        meter_id = self._resolve_meter_id(meter_id)
         self._log.info(
             "Downloading usage XML: %s to %s", from_date.isoformat(), to_date.isoformat()
         )
 
-        form_data_xml = self._build_form_data(from_date, to_date, csv_download=False)
+        form_data_xml = self._build_form_data(
+            from_date, to_date, csv_download=False, meter_id=meter_id
+        )
         text, resp_url = await self._request_with_relogin(
             "POST",
             f"{self._base_url}/app/capricorn",
@@ -634,6 +680,8 @@ class AsyncEnovaClient:
         self,
         from_date: date,
         to_date: date,
+        *,
+        meter_id: str,
     ) -> list[UsageReading]:
         """Download usage data for ranges exceeding 90 days by chunking requests."""
         all_readings: list[UsageReading] = []
@@ -641,7 +689,7 @@ class AsyncEnovaClient:
         current = from_date
         while current <= to_date:
             chunk_end = min(current + timedelta(days=MAX_RANGE_DAYS - 1), to_date)
-            readings = await self.download_usage(current, chunk_end)
+            readings = await self.download_usage(current, chunk_end, meter_id=meter_id)
             for reading in readings:
                 if reading.date not in seen_dates:
                     all_readings.append(reading)
@@ -701,11 +749,14 @@ class AsyncEnovaClient:
         self._log.info("Downloaded %d tariff rates", len(rates))
         return rates
 
-    async def get_latest_usage(self) -> UsageReading | None:
+    async def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
         """Download the most recent usage reading.
 
         Fetches the last 3 days of data (to account for portal lag)
         and returns the most recent reading.
+
+        Args:
+            meter_id: Optional meter to fetch. Defaults to the active meter.
 
         Returns:
             The latest UsageReading, or None if no data available.
@@ -716,7 +767,7 @@ class AsyncEnovaClient:
         """
         to_date = date.today()
         from_date = to_date - timedelta(days=3)
-        readings = await self.download_usage(from_date, to_date)
+        readings = await self.download_usage(from_date, to_date, meter_id=meter_id)
         if readings:
             return max(readings, key=lambda r: r.date)
         return None
