@@ -35,6 +35,11 @@ jobs:
 
   audit:
     runs-on: ubuntu-latest
+    # GitHub-hosted runners only. pip-audit inspects the whole Python
+    # environment; a shared self-hosted runner (e.g. Gitea Actions) may have
+    # unrelated projects installed and pollute the scan. GitHub-hosted runners
+    # are clean per job. On Gitea this condition is false, so the job is skipped.
+    if: ${{ github.server_url == 'https://github.com' }}
     steps:
       - uses: actions/checkout@v4
 
@@ -44,13 +49,9 @@ jobs:
           python-version: "3.12"
 
       - name: Install dependencies
-        # Only the runtime deps (no dev tooling): those are what ship to users.
         run: |
           python -m pip install --upgrade pip setuptools
           python -m pip install -e . pip-audit
 
       - name: Audit dependencies for known vulnerabilities
-        # Skip the editable-installed project itself (enovapower isn't on PyPI
-        # while developing). --strict can't be combined with --skip-editable
-        # because it treats the skipped project as a failure.
         run: pip-audit --skip-editable
