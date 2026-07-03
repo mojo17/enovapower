@@ -5,14 +5,20 @@ from __future__ import annotations
 import csv
 import io
 import re
-from datetime import date, datetime, timezone
+from datetime import date, datetime, timedelta, timezone
 
 from bs4 import BeautifulSoup
 from defusedxml.ElementTree import ParseError
 from defusedxml.ElementTree import fromstring as _xml_fromstring
 
 from enovapower.exceptions import EnovaError
-from enovapower.models import HOUR_KEYS, GreenButtonInterval, TariffRate, UsageReading
+from enovapower.models import (
+    HOUR_KEYS,
+    BillingPeriod,
+    GreenButtonInterval,
+    TariffRate,
+    UsageReading,
+)
 
 _HEADING_RE = re.compile(
     r"^(.+?)\s+Pricing:\s+(\w+ \d{2}, \d{4})\s*-\s*(\w+ \d{2}, \d{4})$"
@@ -227,6 +233,66 @@ def _parse_heading_date(text: str) -> date:
         return datetime.strptime(text, "%b %d, %Y").date()
     except ValueError:
         raise EnovaError(f"Invalid tariff heading date: {text!r}") from None
+
+
+_METER_ID_RE = re.compile(r"Meter-?ID:\s*(\S+)", re.I)
+
+
+def _parse_iso_date(value: str) -> date | None:
+    """Parse an ISO-8601 timestamp cell (e.g. '2026-06-19T04:00:00Z') to a date."""
+    try:
+        return datetime.fromisoformat(value.replace("Z", "+00:00")).date()
+    except ValueError:
+        return None
+
+
+def _parse_money(value: str) -> float:
+    """Parse a '$1,234.56' cell to a float (empty → 0.0)."""
+    cleaned = value.replace("$", "").replace(",", "").strip()
+    return _parse_float(cleaned, "amount")
+
+
+def parse_billing_periods(html: str, meter_id: str | None = None) -> list[BillingPeriod]:
+    """Parse the consumption-inquiry page (``consumptionTable``) into billing cycles.
+
+    Each usage row is one billing cycle: read date, days, kWh, and total billed
+    amount. Non-``Usage`` rows (adjustments) and unparseable rows are skipped.
+    Pass ``meter_id`` to keep only that meter's rows.
+    """
+    soup = BeautifulSoup(html, "html.parser")
+    table = soup.find("table", id="consumptionTable")
+    if not table:
+        return []
+
+    periods: list[BillingPeriod] = []
+    for tr in table.find_all("tr"):
+        cells = [td.get_text(strip=True) for td in tr.find_all("td")]
+        if len(cells) < 8 or cells[3].strip().lower() != "usage":
+            continue
+        end_date = _parse_iso_date(cells[0])
+        if end_date is None:
+            continue
+        match = _METER_ID_RE.search(cells[1])
+        row_meter = match.group(1) if match else None
+        if meter_id is not None and row_meter != meter_id:
+            continue
+        try:
+            days = int(cells[2])
+            usage_kwh = _parse_float(cells[6].replace(",", ""), "usage")
+            amount = _parse_money(cells[7])
+        except (ValueError, EnovaError):
+            continue
+        periods.append(
+            BillingPeriod(
+                start_date=end_date - timedelta(days=days),
+                end_date=end_date,
+                days=days,
+                usage_kwh=usage_kwh,
+                amount=amount,
+                meter_id=row_meter,
+            )
+        )
+    return periods
 
 
 def _local_name(tag: str) -> str:

@@ -9,8 +9,14 @@ from enovapower.exceptions import (
     EnovaNetworkError,
     EnovaSessionExpiredError,
 )
-from enovapower.models import GreenButtonInterval, TariffRate, UsageReading
+from enovapower.models import (
+    BillingPeriod,
+    GreenButtonInterval,
+    TariffRate,
+    UsageReading,
+)
 from enovapower.parsers import (
+    parse_billing_periods,
     parse_csv,
     parse_current_plan,
     parse_green_button_xml,
@@ -31,10 +37,12 @@ __all__ = [
     "EnovaError",
     "EnovaNetworkError",
     "EnovaSessionExpiredError",
+    "BillingPeriod",
     "GreenButtonInterval",
     "TariffRate",
     "UsageReading",
     "UsageStore",
+    "parse_billing_periods",
     "parse_csv",
     "parse_current_plan",
     "parse_green_button_xml",

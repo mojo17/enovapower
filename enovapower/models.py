@@ -127,3 +127,26 @@ class TariffRate:
 
     def __repr__(self) -> str:
         return f"TariffRate(plan={self.plan!r}, name={self.name!r}, price={self.price})"
+
+
+@dataclass
+class BillingPeriod:
+    """A single billing cycle from the consumption inquiry report.
+
+    Attributes:
+        start_date: First day of the cycle (the previous read date).
+        end_date: The meter read date that closes the cycle.
+        days: Number of days in the cycle.
+        usage_kwh: Total kWh billed for the cycle.
+        amount: Total electricity charges billed for the cycle in dollars
+            (energy + delivery + regulatory + HST − rebate; excludes one-time
+            adjustments and balance-forward).
+        meter_id: The meter this cycle is for, if identified.
+    """
+
+    start_date: date
+    end_date: date
+    days: int
+    usage_kwh: float
+    amount: float
+    meter_id: str | None = None

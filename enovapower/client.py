@@ -23,7 +23,7 @@ from enovapower.exceptions import (
     EnovaNetworkError,
     EnovaSessionExpiredError,
 )
-from enovapower.models import TariffRate, UsageReading
+from enovapower.models import BillingPeriod, TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
 
 T = TypeVar("T")
@@ -139,8 +139,11 @@ class EnovaClient:
     ) -> list[TariffRate]:
         return self._run(self._async.download_tariff(from_date, to_date))
 
-    def get_current_plan(self) -> str | None:
-        return self._run(self._async.get_current_plan())
+    def get_current_plan(self, meter_id: str | None = None) -> str | None:
+        return self._run(self._async.get_current_plan(meter_id))
+
+    def billing_periods(self, meter_id: str | None = None) -> list[BillingPeriod]:
+        return self._run(self._async.billing_periods(meter_id))
 
     def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
         return self._run(self._async.get_latest_usage(meter_id=meter_id))

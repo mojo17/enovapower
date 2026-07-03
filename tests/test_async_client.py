@@ -19,7 +19,7 @@ from enovapower.exceptions import (
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_current_plan
 
-from .conftest import MINIMAL_CSV, TARIFF_HTML
+from .conftest import BILLING_HTML, MINIMAL_CSV, TARIFF_HTML
 
 # ---------------------------------------------------------------------------
 # Fixtures & helpers
@@ -606,6 +606,29 @@ class TestAsyncGetCurrentPlan:
         params = session.request.call_args[1]["params"]
         assert params["para"] == "smartMeterPriceCompV3"
         assert params["inquiryType"] == "hydro"
+
+    async def test_passes_selected_meter_id(self):
+        session = _make_session(_mock_aiohttp_response(text="<html></html>"))
+        client = AsyncEnovaClient(session=session)
+        await client.get_current_plan(meter_id="136674")
+        assert session.request.call_args[1]["params"]["selectedMeterId"] == "136674"
+
+
+class TestAsyncBillingPeriods:
+    async def test_fetches_and_parses(self):
+        session = _make_session(_mock_aiohttp_response(text=BILLING_HTML))
+        client = AsyncEnovaClient(session=session)
+        periods = await client.billing_periods()
+        assert len(periods) == 2
+        assert periods[0].amount == 112.13
+
+    async def test_query_params_and_meter_id(self):
+        session = _make_session(_mock_aiohttp_response(text=BILLING_HTML))
+        client = AsyncEnovaClient(session=session)
+        await client.billing_periods(meter_id="136674")
+        params = session.request.call_args[1]["params"]
+        assert params["para"] == "consumptionInquiry"
+        assert params["selectedMeterId"] == "136674"
 
 
 class TestParseCurrentPlan:

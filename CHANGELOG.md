@@ -1,5 +1,16 @@
 # Changelog
 
+## 0.9.0
+
+### Added
+
+- `billing_periods(meter_id=None)` on both clients, plus the `BillingPeriod`
+  model and `parse_billing_periods()`. Returns the account's billing cycles
+  (start/end date, days, kWh, and total billed amount) scraped from the
+  consumption-inquiry report. Non-usage rows (adjustments) are skipped.
+- `get_current_plan(meter_id=None)` gained an optional `meter_id` — it passes
+  `selectedMeterId`, since a subscriber can be on different plans per meter.
+
 ## 0.8.0
 
 ### Added

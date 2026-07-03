@@ -119,3 +119,23 @@ TARIFF_HTML = (
     "</tbody></table>"
     "</body></html>"
 )
+
+BILLING_HTML = (
+    "<html><body>"
+    "<table id='consumptionTable'>"
+    "<thead><tr><th>Date</th><th>ReadDescription</th><th>Days</th><th>Type</th>"
+    "<th>PreviousReading</th><th>CurrentReading</th><th>Usage in kwh</th>"
+    "<th>Amount$</th><th>Avg/Day</th><th>Units</th><th>Multiplier</th></tr></thead>"
+    "<tbody>"
+    "<tr><td>2026-06-19T04:00:00Z</td><td>Meter-ID: 136674</td><td>31</td>"
+    "<td>Usage</td><td>111,790.08</td><td>112,367.41</td><td>577.33</td>"
+    "<td>$112.13</td><td>18.62</td><td>kwh</td><td>0.0</td></tr>"
+    "<tr><td>2026-05-19T04:00:00Z</td><td>Meter-ID: 136674</td><td>30</td>"
+    "<td>Usage</td><td>111,182.17</td><td>111,790.08</td><td>607.91</td>"
+    "<td>$104.97</td><td>20.26</td><td>kwh</td><td>0.0</td></tr>"
+    # A non-usage adjustment row that must be skipped.
+    "<tr><td></td><td>Balance Adjustment</td><td></td><td>Adjustment</td>"
+    "<td></td><td></td><td></td><td>$9.94</td><td></td><td></td><td></td></tr>"
+    "</tbody></table>"
+    "</body></html>"
+)

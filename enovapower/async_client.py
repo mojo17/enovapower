@@ -27,8 +27,13 @@ from enovapower.exceptions import (
     EnovaSessionExpiredError,
 )
 from enovapower.logger import get_logger
-from enovapower.models import TariffRate, UsageReading
-from enovapower.parsers import parse_csv, parse_current_plan, parse_tariff_html
+from enovapower.models import BillingPeriod, TariffRate, UsageReading
+from enovapower.parsers import (
+    parse_billing_periods,
+    parse_csv,
+    parse_current_plan,
+    parse_tariff_html,
+)
 
 log = get_logger()
 
@@ -786,26 +791,52 @@ class AsyncEnovaClient:
         self._log.info("Downloaded %d tariff rates", len(rates))
         return rates
 
-    async def get_current_plan(self) -> str | None:
-        """Fetch and return the account's current rate plan.
+    async def get_current_plan(self, meter_id: str | None = None) -> str | None:
+        """Fetch and return the rate plan for a meter (or the default meter).
 
         Reads the Price Comparison page and returns a normalized slug
         (``"time_of_use"``, ``"ulo"``, or ``"tiered"``), or ``None`` if it can't
-        be determined. The result is also cached on :attr:`plan`. Re-logs in once
+        be determined. Pass ``meter_id`` to target a specific meter (plans can
+        differ per meter). The result is cached on :attr:`plan`. Re-logs in once
         if the session has expired.
         """
+        params: dict[str, str] = {
+            "para": "smartMeterPriceCompV3",
+            "inquiryType": "hydro",
+            "tab": "SMCOMPARV3",
+        }
+        if meter_id is not None:
+            params["selectedMeterId"] = meter_id
         text, _ = await self._request_with_relogin(
             "GET",
             f"{self._base_url}/app/capricorn",
-            params={
-                "para": "smartMeterPriceCompV3",
-                "inquiryType": "hydro",
-                "tab": "SMCOMPARV3",
-            },
+            params=params,
             error_msg="Failed to fetch rate plan",
         )
         self._plan = parse_current_plan(text)
         return self._plan
+
+    async def billing_periods(self, meter_id: str | None = None) -> list[BillingPeriod]:
+        """Fetch the account's billing cycles (read date, days, kWh, amount).
+
+        Reads the consumption-inquiry report. Pass ``meter_id`` to select/keep a
+        single meter's cycles. Re-logs in once if the session has expired.
+        """
+        params: dict[str, str] = {
+            "para": "consumptionInquiry",
+            "inquiryType": "hydro",
+            "report": "ELECONRP",
+            "tab": "HYDROCON",
+        }
+        if meter_id is not None:
+            params["selectedMeterId"] = meter_id
+        text, _ = await self._request_with_relogin(
+            "GET",
+            f"{self._base_url}/app/capricorn",
+            params=params,
+            error_msg="Failed to fetch billing periods",
+        )
+        return parse_billing_periods(text, meter_id=meter_id)
 
     async def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
         """Download the most recent usage reading.

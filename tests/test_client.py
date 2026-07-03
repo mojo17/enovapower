@@ -8,9 +8,15 @@ import pytest
 from enovapower.client import EnovaClient
 from enovapower.exceptions import EnovaAuthError, EnovaError, EnovaNetworkError
 from enovapower.models import GreenButtonInterval, TariffRate, UsageReading
-from enovapower.parsers import parse_csv, parse_green_button_xml, parse_tariff_html
+from enovapower.parsers import (
+    parse_billing_periods,
+    parse_csv,
+    parse_green_button_xml,
+    parse_tariff_html,
+)
 
 from .conftest import (
+    BILLING_HTML,
     GREEN_BUTTON_XML,
     GREEN_BUTTON_XML_ENTITY_BOMB,
     MINIMAL_CSV,
@@ -206,6 +212,30 @@ class TestParseTariffHtml:
         bad = TARIFF_HTML.replace("Nov 01, 2025", "Xyz 01, 2025")
         with pytest.raises(EnovaError, match="Invalid tariff heading date"):
             parse_tariff_html(bad)
+
+
+class TestParseBillingPeriods:
+    def test_parses_cycles(self):
+        periods = parse_billing_periods(BILLING_HTML)
+        assert len(periods) == 2  # the adjustment row is skipped
+        p = periods[0]
+        assert p.end_date == date(2026, 6, 19)
+        assert p.start_date == date(2026, 5, 19)  # end_date - 31 days
+        assert p.days == 31
+        assert p.usage_kwh == 577.33
+        assert p.amount == 112.13
+        assert p.meter_id == "136674"
+
+    def test_skips_non_usage_rows(self):
+        # The $9.94 adjustment row must not be treated as a cycle.
+        assert 9.94 not in [p.amount for p in parse_billing_periods(BILLING_HTML)]
+
+    def test_filter_by_meter(self):
+        assert parse_billing_periods(BILLING_HTML, meter_id="136674")
+        assert parse_billing_periods(BILLING_HTML, meter_id="999999") == []
+
+    def test_empty_when_no_table(self):
+        assert parse_billing_periods("<html></html>") == []
 
 
 # ---------------------------------------------------------------------------
