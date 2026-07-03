@@ -110,6 +110,10 @@ class TariffRate:
         name: Rate name (e.g. "TOU Off-peak").
         price: Price in cents per kWh.
         description: Human-readable description of when the rate applies.
+        threshold_start: For Tiered rates, the cumulative-kWh lower bound of the
+            tier within the billing period; None for non-tiered rates.
+        threshold_end: For Tiered rates, the cumulative-kWh upper bound of the
+            tier; None for non-tiered rates or an open-ended (top) tier.
     """
 
     start_date: date
@@ -118,6 +122,8 @@ class TariffRate:
     name: str
     price: float
     description: str = ""
+    threshold_start: float | None = None
+    threshold_end: float | None = None
 
     def __repr__(self) -> str:
         return f"TariffRate(plan={self.plan!r}, name={self.name!r}, price={self.price})"

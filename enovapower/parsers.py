@@ -149,10 +149,24 @@ def parse_csv(raw_csv: str) -> list[UsageReading]:
     return readings
 
 
+def _parse_threshold(value: str) -> float | None:
+    """Parse a tiered threshold cell ('0.0', '600.0', 'Infinity') to a float.
+
+    Returns None for a non-finite bound (e.g. 'Infinity') or unparseable input,
+    representing an open-ended tier.
+    """
+    try:
+        result = float(value)
+    except ValueError:
+        return None
+    return result if result != float("inf") else None
+
+
 def parse_tariff_html(html: str) -> list[TariffRate]:
     """Parse the Price Comparison HTML page into TariffRate objects.
 
     Returns a list of TariffRate with plan, name, price, dates, description.
+    Tiered rows also carry ``threshold_start``/``threshold_end`` (cumulative kWh).
     """
     soup = BeautifulSoup(html, "html.parser")
     rates: list[TariffRate] = []
@@ -182,8 +196,12 @@ def parse_tariff_html(html: str) -> list[TariffRate]:
             name = cells[0]
             price = _parse_float(cells[1], "price")
 
+            threshold_start: float | None = None
+            threshold_end: float | None = None
             if plan == "Tiered" and len(cells) >= 4:
                 description = f"{cells[2]} - {cells[3]} kWh"
+                threshold_start = _parse_threshold(cells[2])
+                threshold_end = _parse_threshold(cells[3])
             elif len(cells) >= 3:
                 description = cells[2]
             else:
@@ -196,6 +214,8 @@ def parse_tariff_html(html: str) -> list[TariffRate]:
                 name=name,
                 price=price,
                 description=description,
+                threshold_start=threshold_start,
+                threshold_end=threshold_end,
             ))
 
     return rates

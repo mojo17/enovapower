@@ -165,11 +165,22 @@ class TestParseTariffHtml:
         tier1 = next(r for r in rates if r.name == "Tier 1")
         assert tier1.price == 12.0
         assert tier1.description == "0.0 - 1000.0 kWh"
+        assert tier1.threshold_start == 0.0
+        assert tier1.threshold_end == 1000.0
 
     def test_tier_infinity(self):
         rates = parse_tariff_html(TARIFF_HTML)
         tier2 = next(r for r in rates if r.name == "Tier 2")
         assert tier2.description == "1000.0 - Infinity kWh"
+        assert tier2.threshold_start == 1000.0
+        assert tier2.threshold_end is None  # "Infinity" -> open-ended
+
+    def test_non_tiered_rows_have_no_thresholds(self):
+        non_tiered = [r for r in parse_tariff_html(TARIFF_HTML) if r.plan != "Tiered"]
+        assert non_tiered  # sanity
+        assert all(
+            r.threshold_start is None and r.threshold_end is None for r in non_tiered
+        )
 
     def test_total_rate_count(self):
         rates = parse_tariff_html(TARIFF_HTML)

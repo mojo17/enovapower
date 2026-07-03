@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.8.0
+
+### Added
+
+- `TariffRate.threshold_start` / `threshold_end` (cumulative kWh) — structured
+  tier boundaries for Tiered rates, parsed from the Price Comparison table's
+  threshold columns (`"Infinity"` → `None`, an open-ended top tier). Non-tiered
+  rates leave both `None`. Lets consumers compute tiered cost without parsing the
+  `description` string.
+
 ## 0.7.0
 
 ### Added
