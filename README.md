@@ -2,7 +2,7 @@
 
 [![PyPI version](https://img.shields.io/pypi/v/enovapower.svg)](https://pypi.org/project/enovapower/)
 [![Python versions](https://img.shields.io/pypi/pyversions/enovapower.svg)](https://pypi.org/project/enovapower/)
-[![License](https://img.shields.io/pypi/l/enovapower.svg)](https://github.com/hanihawari/enovapower/blob/main/LICENSE)
+[![License](https://img.shields.io/pypi/l/enovapower.svg)](https://github.com/mojo17/enovapower/blob/main/LICENSE)
 
 > **⚠️ Unofficial project — not affiliated with, endorsed by, or supported by Enova Power Corp.** "Enova Power" is a trademark of its respective owner. Use at your own risk under the Apache-2.0 license.
 

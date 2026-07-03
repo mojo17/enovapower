@@ -1,5 +1,13 @@
 # Changelog
 
+## 0.6.2
+
+### Fixed
+
+- Project URLs (`pyproject.toml`) and the README license-badge link pointed at a
+  nonexistent `hanihawari` GitHub namespace; corrected to `mojo17`. Metadata-only
+  release — no code changes from 0.6.1.
+
 ## 0.6.1
 
 ### Fixed

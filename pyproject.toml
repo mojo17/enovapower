@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enovapower"
-version = "0.6.1"
+version = "0.6.2"
 description = "Python client for downloading electricity usage data from Enova Power"
 readme = "README.md"
 license = "Apache-2.0"
@@ -42,9 +42,9 @@ dev = [
 ]
 
 [project.urls]
-Homepage = "https://github.com/hanihawari/enovapower"
-Repository = "https://github.com/hanihawari/enovapower"
-Issues = "https://github.com/hanihawari/enovapower/issues"
+Homepage = "https://github.com/mojo17/enovapower"
+Repository = "https://github.com/mojo17/enovapower"
+Issues = "https://github.com/mojo17/enovapower/issues"
 
 [tool.hatch.build.targets.wheel]
 packages = ["enovapower"]
