@@ -1,5 +1,15 @@
 # Changelog
 
+## 0.6.1
+
+### Fixed
+
+- Meter discovery on single-meter accounts. The `selectedMeterId` form field is
+  empty on page load, so `login()` resolved no meter (`meter_ids == []`) and
+  every download raised "Not logged in or meter ID not found". The meter id is
+  now also scraped from the page script (the custom-events widget URL,
+  `...&meterId=<digits>&...`) as a fallback after the form field.
+
 ## 0.6.0
 
 ### Added

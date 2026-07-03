@@ -56,6 +56,18 @@ IFRAME_HTML_WITH_METER = """
 </body></html>
 """
 
+# Single-meter account: the selectedMeterId field is empty on load; the meter id
+# only appears in a page script (the custom-events widget URL).
+IFRAME_HTML_SCRIPT_METER = """
+<html><body>
+<input type="hidden" name="selectedMeterId" id="selectedMeterId" value="" />
+<script>
+  var loadCustomEventWidgetUrl = "/app/capricorn?para=editCustomEvents&meterId=136674";
+  var ajaxURL = "/app/capricorn?para=smartMeterConsumV3&interval=&selectedMeterId=&tab=SMCONSUMV3";
+</script>
+</body></html>
+"""
+
 CSV_DOWNLOAD_RESPONSE_HTML = """
 <html><body>
 <form name="downloadData2Spreadsheet" method="post"
@@ -306,6 +318,36 @@ class TestAsyncExtractAccountInfo:
         soup = BeautifulSoup("<html></html>", "html.parser")
         await client._extract_account_info(soup)
         assert client._meter_id is None
+
+    async def test_fallback_to_script_meter_id(self):
+        """Single-meter page: selectedMeterId is empty, so scrape the script URL."""
+        from bs4 import BeautifulSoup
+        iframe_resp = _mock_aiohttp_response(text=IFRAME_HTML_SCRIPT_METER)
+        session = _make_session(iframe_resp)
+        client = AsyncEnovaClient(session=session)
+
+        soup = BeautifulSoup(DASHBOARD_HTML_NO_METER, "html.parser")
+        await client._extract_account_info(soup)
+        assert client._meter_id == "136674"
+        assert client._meter_ids == ["136674"]
+
+
+class TestExtractMeterIdsFromScript:
+    def test_extracts_meter_id_from_widget_url(self):
+        html = 'x = "/app/capricorn?para=editCustomEvents&meterId=136674&viewInChart=TOU";'
+        assert AsyncEnovaClient._extract_meter_ids_from_script(html) == ["136674"]
+
+    def test_ignores_empty_selected_meter_id(self):
+        # An empty selectedMeterId= must not be read as a meter id.
+        html = 'url = "?para=smartMeterConsumV3&selectedMeterId=&tab=SMCONSUMV3";'
+        assert AsyncEnovaClient._extract_meter_ids_from_script(html) == []
+
+    def test_dedupes_preserving_document_order(self):
+        html = "?meterId=136674 &meterId=200000 &meterId=136674"
+        assert AsyncEnovaClient._extract_meter_ids_from_script(html) == ["136674", "200000"]
+
+    def test_returns_empty_when_absent(self):
+        assert AsyncEnovaClient._extract_meter_ids_from_script("<html></html>") == []
 
 
 # ---------------------------------------------------------------------------

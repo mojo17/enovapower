@@ -11,6 +11,7 @@ import asyncio
 import logging
 import os
 import random
+import re
 from collections.abc import Awaitable, Callable
 from datetime import date, timedelta
 from typing import Any
@@ -395,6 +396,11 @@ class AsyncEnovaClient:
                 )
                 iframe_soup = BeautifulSoup(text, "html.parser")
                 meter_ids = self._extract_meter_ids_from_form(iframe_soup)
+                # Single-meter accounts leave the selectedMeterId field empty; the
+                # meter id then only appears in a page script (the custom-events
+                # widget URL, "...&meterId=<digits>&..."). Fall back to that.
+                if not meter_ids:
+                    meter_ids = self._extract_meter_ids_from_script(text)
             except EnovaNetworkError:
                 pass
 
@@ -424,6 +430,21 @@ class AsyncEnovaClient:
                 value = meter_input.get("value")
                 if isinstance(value, str) and value:
                     meter_ids.append(value)
+        return meter_ids
+
+    @staticmethod
+    def _extract_meter_ids_from_script(html: str) -> list[str]:
+        """Scrape meter id(s) from inline page scripts.
+
+        On single-meter accounts the ``selectedMeterId`` form field is empty, so
+        the meter id only appears in a script URL such as
+        ``/app/capricorn?para=editCustomEvents&meterId=136674&...``. Collect every
+        distinct ``meterId=<digits>`` (query-parameter form) in document order.
+        """
+        meter_ids: list[str] = []
+        for mid in re.findall(r"[?&]meterId=(\d+)", html):
+            if mid not in meter_ids:
+                meter_ids.append(mid)
         return meter_ids
 
     @staticmethod
