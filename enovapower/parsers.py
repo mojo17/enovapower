@@ -24,6 +24,15 @@ _PLAN_NAMES = {
     "Tiered Price Plan": "Tiered",
 }
 
+# The Price Comparison page shows a banner: "Your current rate plan is <plan>".
+# Map the wording to a normalized plan slug.
+_CURRENT_PLAN_RE = re.compile(r"current rate plan is\s*(.+?)\s*(?:<|$)", re.I)
+_PLAN_SLUGS: tuple[tuple[str, tuple[str, ...]], ...] = (
+    ("time_of_use", ("time-of-use", "time of use")),
+    ("ulo", ("ultra-low overnight", "ultra low overnight", "ulo")),
+    ("tiered", ("tiered",)),
+)
+
 _HOUR_OFFSET = 1
 _TOU_OFFSET = _HOUR_OFFSET + len(HOUR_KEYS)
 
@@ -53,6 +62,23 @@ def _parse_optional_float(value: str, field_name: str = "value") -> float | None
         return float(value)
     except ValueError:
         raise EnovaError(f"Invalid {field_name}: {value!r}") from None
+
+
+def parse_current_plan(html: str) -> str | None:
+    """Extract the account's current rate plan from the Price Comparison page.
+
+    The page shows a banner reading "Your current rate plan is <plan>". Returns a
+    normalized slug — ``"time_of_use"``, ``"ulo"``, or ``"tiered"`` — or ``None``
+    if the banner is absent or the wording is unrecognized.
+    """
+    match = _CURRENT_PLAN_RE.search(html)
+    if not match:
+        return None
+    text = match.group(1).lower()
+    for slug, needles in _PLAN_SLUGS:
+        if any(needle in text for needle in needles):
+            return slug
+    return None
 
 
 def parse_csv(raw_csv: str) -> list[UsageReading]:

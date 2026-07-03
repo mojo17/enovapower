@@ -17,7 +17,7 @@ from enovapower.exceptions import (
     EnovaSessionExpiredError,
 )
 from enovapower.models import TariffRate, UsageReading
-from enovapower.parsers import parse_csv
+from enovapower.parsers import parse_csv, parse_current_plan
 
 from .conftest import MINIMAL_CSV, TARIFF_HTML
 
@@ -570,6 +570,60 @@ class TestAsyncDownloadTariff:
         assert params["fromYear"] == "2026"
         assert params["fromMonth"] == "02"
         assert params["fromDay"] == "25"
+
+    async def test_caches_current_plan(self):
+        banner = (
+            '<div class="alert alert-success">'
+            "<p>Your current rate plan is Time-of-Use Pricing</p></div>"
+        )
+        resp = _mock_aiohttp_response(text=TARIFF_HTML + banner)
+        session = _make_session(resp)
+        client = self._make_client(session)
+
+        assert client.plan is None
+        await client.download_tariff(date(2026, 2, 25), date(2026, 3, 26))
+        assert client.plan == "time_of_use"
+
+
+class TestAsyncGetCurrentPlan:
+    async def test_fetches_and_caches(self):
+        banner = (
+            '<div class="alert alert-success">'
+            "<p>Your current rate plan is Ultra-Low Overnight Pricing</p></div>"
+        )
+        session = _make_session(_mock_aiohttp_response(text=banner))
+        client = AsyncEnovaClient(session=session)
+
+        assert await client.get_current_plan() == "ulo"
+        assert client.plan == "ulo"
+
+    async def test_query_params(self):
+        session = _make_session(_mock_aiohttp_response(text="<html></html>"))
+        client = AsyncEnovaClient(session=session)
+
+        await client.get_current_plan()
+
+        params = session.request.call_args[1]["params"]
+        assert params["para"] == "smartMeterPriceCompV3"
+        assert params["inquiryType"] == "hydro"
+
+
+class TestParseCurrentPlan:
+    def test_time_of_use(self):
+        html = "<p>Your current rate plan is Time-of-Use Pricing</p>"
+        assert parse_current_plan(html) == "time_of_use"
+
+    def test_ulo(self):
+        assert parse_current_plan("current rate plan is Ultra-Low Overnight Pricing<") == "ulo"
+
+    def test_tiered(self):
+        assert parse_current_plan("current rate plan is Tiered Pricing<") == "tiered"
+
+    def test_absent(self):
+        assert parse_current_plan("<p>no banner</p>") is None
+
+    def test_unrecognized_wording(self):
+        assert parse_current_plan("current rate plan is Mystery Plan<") is None
 
 
 # ---------------------------------------------------------------------------

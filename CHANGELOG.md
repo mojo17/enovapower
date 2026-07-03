@@ -1,5 +1,22 @@
 # Changelog
 
+## 0.7.0
+
+### Added
+
+- Current rate plan detection. `AsyncEnovaClient.get_current_plan()` /
+  `EnovaClient.get_current_plan()` and a `plan` property report the account's
+  plan as a normalized slug (`"time_of_use"`, `"ulo"`, or `"tiered"`), scraped
+  from the Price Comparison page's banner. `download_tariff` caches the plan as a
+  side effect (it reads the same page), and `parse_current_plan(html)` is exposed
+  as a standalone parser.
+
+### Fixed
+
+- `__version__` is now derived from the installed package metadata rather than a
+  hardcoded literal, so it can no longer drift from `pyproject.toml` (0.6.1 and
+  0.6.2 shipped a stale `__version__` of `"0.6.0"`).
+
 ## 0.6.2
 
 ### Fixed

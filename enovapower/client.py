@@ -99,6 +99,11 @@ class EnovaClient:
     def account_number(self) -> str | None:
         return self._async.account_number
 
+    @property
+    def plan(self) -> str | None:
+        """Current rate plan slug once detected; see :attr:`AsyncEnovaClient.plan`."""
+        return self._async.plan
+
     def select_meter(self, meter_id: str) -> None:
         self._async.select_meter(meter_id)
 
@@ -133,6 +138,9 @@ class EnovaClient:
         to_date: date,
     ) -> list[TariffRate]:
         return self._run(self._async.download_tariff(from_date, to_date))
+
+    def get_current_plan(self) -> str | None:
+        return self._run(self._async.get_current_plan())
 
     def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
         return self._run(self._async.get_latest_usage(meter_id=meter_id))

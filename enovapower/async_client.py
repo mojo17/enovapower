@@ -28,7 +28,7 @@ from enovapower.exceptions import (
 )
 from enovapower.logger import get_logger
 from enovapower.models import TariffRate, UsageReading
-from enovapower.parsers import parse_csv, parse_tariff_html
+from enovapower.parsers import parse_csv, parse_current_plan, parse_tariff_html
 
 log = get_logger()
 
@@ -98,6 +98,7 @@ class AsyncEnovaClient:
         self._meter_id: str | None = None
         self._meter_ids: list[str] = []
         self._account_number: str | None = None
+        self._plan: str | None = None
         self._access_code: str | None = None
         self._password: str | None = None
         self._retries = max(retries, 0)
@@ -266,6 +267,16 @@ class AsyncEnovaClient:
     @property
     def account_number(self) -> str | None:
         return self._account_number
+
+    @property
+    def plan(self) -> str | None:
+        """The account's current rate plan slug, once detected.
+
+        Populated by :meth:`get_current_plan` or as a side effect of
+        :meth:`download_tariff` (both read the Price Comparison page). One of
+        ``"time_of_use"``, ``"ulo"``, ``"tiered"``, or ``None`` if not yet known.
+        """
+        return self._plan
 
     def select_meter(self, meter_id: str) -> None:
         """Set the active meter used by subsequent downloads.
@@ -767,8 +778,34 @@ class AsyncEnovaClient:
         )
 
         rates = parse_tariff_html(text)
+        # The Price Comparison page also carries the current-rate-plan banner;
+        # capture it here so callers get the plan without an extra request.
+        detected = parse_current_plan(text)
+        if detected is not None:
+            self._plan = detected
         self._log.info("Downloaded %d tariff rates", len(rates))
         return rates
+
+    async def get_current_plan(self) -> str | None:
+        """Fetch and return the account's current rate plan.
+
+        Reads the Price Comparison page and returns a normalized slug
+        (``"time_of_use"``, ``"ulo"``, or ``"tiered"``), or ``None`` if it can't
+        be determined. The result is also cached on :attr:`plan`. Re-logs in once
+        if the session has expired.
+        """
+        text, _ = await self._request_with_relogin(
+            "GET",
+            f"{self._base_url}/app/capricorn",
+            params={
+                "para": "smartMeterPriceCompV3",
+                "inquiryType": "hydro",
+                "tab": "SMCOMPARV3",
+            },
+            error_msg="Failed to fetch rate plan",
+        )
+        self._plan = parse_current_plan(text)
+        return self._plan
 
     async def get_latest_usage(self, *, meter_id: str | None = None) -> UsageReading | None:
         """Download the most recent usage reading.
