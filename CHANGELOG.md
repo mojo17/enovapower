@@ -1,5 +1,28 @@
 # Changelog
 
+## 0.11.0
+
+### Fixed
+
+- **Interval timestamps are now interpreted in local Ontario wall-clock time
+  (America/Toronto, DST-observing) instead of fixed EST (UTC-5).** The portal's
+  hourly labels are wall-clock slots, so the old fixed-EST interpretation
+  produced UTC timestamps one hour late during daylight saving (summer). This
+  was proven against real meter data on the DST transition days: the
+  spring-forward day zeroes the skipped hour's slot and the fall-back day lumps
+  the repeated hour into one slot — signatures a fixed-offset feed cannot
+  produce. Bucket/TOU classification by label value was always correct; only
+  the absolute timestamps shift.
+- `intervals()` on the spring-forward day now omits the nonexistent local
+  hour's slot (23 pairs instead of 24) — mapping it would collide with the
+  next hour's UTC instant. The fall-back day's ambiguous hour resolves to its
+  first occurrence and carries the portal's lumped value as-is.
+
+### Changed
+
+- `models.EASTERN_STANDARD` (fixed UTC-5) is replaced by `models.LOCAL_TIMEZONE`
+  (`America/Toronto`). `tzdata` is now a dependency on Windows.
+
 ## 0.10.0
 
 ### Added

@@ -4,16 +4,19 @@ from __future__ import annotations
 
 from collections.abc import Iterable
 from dataclasses import dataclass, field
-from datetime import date, datetime, timedelta, timezone, tzinfo
+from datetime import date, datetime, timezone, tzinfo
+from zoneinfo import ZoneInfo
 
 HOUR_KEYS = [f"h{i:02d}" for i in range(1, 25)]
 
-# Enova interval data is reported in fixed Eastern *Standard* Time (UTC-5)
-# year-round, with no daylight-saving shift — which is why every day always
-# has exactly 24 hourly values (a DST-observing local zone would have 23 or
-# 25 on transition days). ``intervals()`` uses this offset to produce correct,
-# unambiguous UTC timestamps. See ``UsageReading.intervals`` for details.
-EASTERN_STANDARD = timezone(timedelta(hours=-5))
+# Enova interval data is reported in **local Ontario wall-clock time**
+# (America/Toronto, DST-observing) — NOT fixed EST. Verified against the DST
+# transition days in real meter data: the spring-forward day zeroes the
+# skipped hour's slot (h03 on 2026-03-08) and the fall-back day lumps the
+# repeated hour into one slot — signatures a fixed-offset feed cannot produce.
+# The portal still always renders 24 column slots; ``intervals()`` handles the
+# two transition days (see its docstring).
+LOCAL_TIMEZONE = ZoneInfo("America/Toronto")
 
 
 def _sum_present(values: Iterable[float | None]) -> float:
@@ -53,17 +56,26 @@ class UsageReading:
         """Return ``(interval_start, kWh)`` pairs as timezone-aware datetimes.
 
         Each of the 24 hourly values maps to an **hour-starting** timestamp in
-        fixed Eastern Standard Time (UTC-5, no DST): ``h01`` covers 00:00-01:00,
-        ``h02`` covers 01:00-02:00, ... ``h24`` covers 23:00-00:00. Timestamps
-        are converted to ``tz`` (UTC by default), which is the form consumers
-        such as time-series databases and the Home Assistant statistics engine
-        expect. Hours with no reported data yield ``None`` rather than ``0.0``.
+        local Ontario wall-clock time (America/Toronto, DST-observing):
+        ``h01`` covers 00:00-01:00, ``h02`` covers 01:00-02:00, ... ``h24``
+        covers 23:00-00:00. Timestamps are converted to ``tz`` (UTC by
+        default), which is the form consumers such as time-series databases
+        and the Home Assistant statistics engine expect. Hours with no
+        reported data yield ``None`` rather than ``0.0``.
+
+        DST transition days: on the spring-forward day the skipped wall-clock
+        hour does not exist as a local time, so its slot (which the portal
+        zeroes) is **omitted** — the day yields 23 pairs; mapping it anyway
+        would collide with the next hour's UTC instant. On the fall-back day
+        the repeated wall-clock hour resolves to its first occurrence, and the
+        portal's lumped two-hours-in-one-slot value is passed through as-is.
 
         Args:
             tz: Target timezone for the returned timestamps (default UTC).
 
         Returns:
-            A list of 24 ``(datetime, kWh-or-None)`` tuples ordered by time.
+            A list of ``(datetime, kWh-or-None)`` tuples ordered by time
+            (24 pairs, or 23 on the spring-forward day).
         """
         result: list[tuple[datetime, float | None]] = []
         for hour, key in enumerate(HOUR_KEYS):  # hour = 0..23 (interval start)
@@ -72,8 +84,12 @@ class UsageReading:
                 self.date.month,
                 self.date.day,
                 hour=hour,
-                tzinfo=EASTERN_STANDARD,
+                tzinfo=LOCAL_TIMEZONE,
             )
+            # A nonexistent local time (spring-forward gap) doesn't survive a
+            # UTC round-trip; skip its slot entirely.
+            if start.astimezone(timezone.utc).astimezone(LOCAL_TIMEZONE).hour != hour:
+                continue
             result.append((start.astimezone(tz), self.hourly.get(key)))
         return result
 

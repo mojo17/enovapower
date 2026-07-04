@@ -552,6 +552,51 @@ class TestUsageReadingIntervals:
         start, _ = reading.intervals(tz=eastern_standard)[0]
         assert start.hour == 0  # midnight local EST
 
+    def test_summer_maps_to_edt(self):
+        """In July, local midnight is EDT (UTC-4): h01 → 04:00 UTC."""
+        from datetime import datetime, timezone
+
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        reading = UsageReading(date=date(2026, 7, 15), hourly=hourly)
+        intervals = reading.intervals()
+        assert intervals[0] == (datetime(2026, 7, 15, 4, tzinfo=timezone.utc), 1.0)
+        assert intervals[23] == (datetime(2026, 7, 16, 3, tzinfo=timezone.utc), 24.0)
+
+    def test_spring_forward_day_skips_nonexistent_hour(self):
+        """2026-03-08: local 02:00 doesn't exist; its slot (h03) is omitted."""
+        from datetime import datetime, timezone
+
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        hourly["h03"] = 0.0  # the portal zeroes the dead slot
+        reading = UsageReading(date=date(2026, 3, 8), hourly=hourly)
+        intervals = reading.intervals()
+        assert len(intervals) == 23
+        starts = [s for s, _ in intervals]
+        # h02 (01:00 EST) → 06:00 UTC; h04 (03:00 EDT) → 07:00 UTC — contiguous,
+        # no colliding or duplicated UTC instants.
+        assert datetime(2026, 3, 8, 6, tzinfo=timezone.utc) in starts
+        assert datetime(2026, 3, 8, 7, tzinfo=timezone.utc) in starts
+        assert len(set(starts)) == len(starts)
+        values = dict(intervals)
+        assert values[datetime(2026, 3, 8, 7, tzinfo=timezone.utc)] == 4.0  # h04
+
+    def test_fall_back_day_first_occurrence(self):
+        """2025-11-02: local 01:00 repeats; the slot maps to its first pass (EDT)."""
+        from datetime import datetime, timezone
+
+        hourly = {f"h{i:02d}": float(i) for i in range(1, 25)}
+        reading = UsageReading(date=date(2025, 11, 2), hourly=hourly)
+        intervals = reading.intervals()
+        assert len(intervals) == 24
+        starts = [s for s, _ in intervals]
+        # h01 (00:00 EDT) → 04:00 UTC; h02 (01:00, fold=0 → EDT) → 05:00 UTC;
+        # h03 (02:00 EST) → 07:00 UTC. The physical 06:00 UTC hour (second
+        # pass of 01:00) has no slot of its own — the portal lumps it.
+        assert datetime(2025, 11, 2, 4, tzinfo=timezone.utc) in starts
+        assert datetime(2025, 11, 2, 5, tzinfo=timezone.utc) in starts
+        assert datetime(2025, 11, 2, 6, tzinfo=timezone.utc) not in starts
+        assert datetime(2025, 11, 2, 7, tzinfo=timezone.utc) in starts
+
 
 class TestTariffRateModel:
     def test_repr(self):

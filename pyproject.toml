@@ -4,7 +4,7 @@ build-backend = "hatchling.build"
 
 [project]
 name = "enovapower"
-version = "0.10.0"
+version = "0.11.0"
 description = "Python client for downloading electricity usage data from Enova Power"
 readme = "README.md"
 license = "Apache-2.0"
@@ -32,6 +32,8 @@ dependencies = [
     "aiohttp>=3.14.1",
     # Safe XML parsing for Green Button exports (guards entity-expansion).
     "defusedxml>=0.7",
+    # IANA timezone data for America/Toronto where the OS lacks it.
+    'tzdata; platform_system == "Windows"',
 ]
 
 [project.optional-dependencies]
