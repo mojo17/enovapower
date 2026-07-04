@@ -249,12 +249,17 @@ with UsageStore("usage.db") as store:
 
 ### Incremental Updates
 
-`update()` finds the latest stored date and downloads only new data since then. If no prior data exists, it falls back to `seed()`.
+`update()` finds the latest stored date and downloads everything since — plus a
+few days of overlap (`UPDATE_OVERLAP_DAYS`, currently 3) before it. The portal
+publishes data in arrears and revises recent days, so the newest stored rows are
+often partial when first written; the overlap re-fetch picks those revisions up
+(rows are upserted in place, so it's idempotent). If no prior data exists, it
+falls back to `seed()`.
 
 ```python
 with UsageStore("usage.db") as store:
     new_data = store.update(client)
-    print(f"Downloaded {len(new_data)} new days")
+    print(f"Downloaded {len(new_data)} days (new + refreshed overlap)")
 ```
 
 ### Querying Stored Data

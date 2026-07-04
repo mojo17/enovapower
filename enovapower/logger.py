@@ -11,8 +11,6 @@ if TYPE_CHECKING:
 
 LOGGER_NAME = "enovapower"
 
-_logger: logging.Logger | None = None
-
 
 def get_logger() -> logging.Logger:
     """Get the enovapower logger.
@@ -21,14 +19,11 @@ def get_logger() -> logging.Logger:
     Users can configure their own logging or use configure_logging()
     for default behavior.
     """
-    global _logger
-    if _logger is None:
-        _logger = logging.getLogger(LOGGER_NAME)
-    return _logger
+    return logging.getLogger(LOGGER_NAME)
 
 
 def configure_logging(
-    level: int = logging.DEBUG,
+    level: int = logging.INFO,
     handlers: Sequence[logging.Handler] | None = None,
     format_string: str | None = None,
 ) -> logging.Logger:
@@ -38,7 +33,8 @@ def configure_logging(
     Python's standard logging configuration.
 
     Args:
-        level: Minimum log level to output (default: DEBUG).
+        level: Minimum log level to output (default: INFO; pass
+            ``logging.DEBUG`` for request/response tracing).
         handlers: Custom handlers to use. If None, a default StreamHandler
             to stdout is created.
         format_string: Custom format string. If None, uses default format.

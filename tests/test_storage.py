@@ -1,9 +1,10 @@
 """Tests for the Enova Power SQLite storage layer."""
 
 import os
+import sqlite3
 import stat
 import threading
-from datetime import date
+from datetime import date, timedelta
 from unittest.mock import AsyncMock, MagicMock, PropertyMock, patch
 
 import pytest
@@ -11,7 +12,7 @@ import pytest
 from enovapower.exceptions import EnovaError
 from enovapower.models import TariffRate, UsageReading
 from enovapower.parsers import parse_csv
-from enovapower.storage import UsageStore, _months_ago
+from enovapower.storage import UPDATE_OVERLAP_DAYS, UsageStore, _months_ago
 
 from .conftest import MINIMAL_CSV, TWO_ROW_CSV
 
@@ -301,22 +302,28 @@ class TestUpdate:
 
         assert len(readings) == 1
         args = client.download_usage.call_args[0]
-        assert args[0] == date(2026, 3, 3)   # day after latest
+        # Re-fetches an overlap before the latest stored day (2026-03-02) to
+        # pick up portal revisions to recently-published rows.
+        assert args[0] == date(2026, 3, 2) - timedelta(days=UPDATE_OVERLAP_DAYS)
         assert args[1] == date(2026, 3, 27)   # today
 
     @patch("enovapower.storage.date")
-    def test_update_already_current(self, mock_date):
+    def test_update_refreshes_overlap_when_current(self, mock_date):
+        """Even with the latest day already stored, the overlap is re-fetched."""
         mock_date.today.return_value = date(2026, 3, 1)
         mock_date.side_effect = lambda *args: date(*args)
         mock_date.fromisoformat = date.fromisoformat
 
-        client = _mock_client()
+        revised = _make_readings()  # a revision of the already-stored day
+        client = _mock_client(readings=revised)
         with UsageStore(":memory:") as store:
             store.save(METER_ID, _make_readings())  # has 2026-03-01
             readings = store.update(client)
 
-        assert readings == []
-        client.download_usage.assert_not_called()
+        args = client.download_usage.call_args[0]
+        assert args[0] == date(2026, 3, 1) - timedelta(days=UPDATE_OVERLAP_DAYS)
+        assert args[1] == date(2026, 3, 1)
+        assert len(readings) == 1
 
     def test_update_stores_new_data(self):
         new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-10")
@@ -433,6 +440,61 @@ class TestLoadTariff:
             rates = store.load_tariff()
             assert len(rates) == 4
             assert all(isinstance(r, TariffRate) for r in rates)
+
+    def test_thresholds_round_trip(self):
+        tiered = [
+            TariffRate(
+                start_date=date(2025, 11, 1),
+                end_date=date(2026, 4, 30),
+                plan="Tiered",
+                name="Tier 1",
+                price=12.0,
+                description="0.0 - 1000.0 kWh",
+                threshold_start=0.0,
+                threshold_end=1000.0,
+            ),
+            TariffRate(
+                start_date=date(2025, 11, 1),
+                end_date=date(2026, 4, 30),
+                plan="Tiered",
+                name="Tier 2",
+                price=14.2,
+                description="1000.0 - Infinity kWh",
+                threshold_start=1000.0,
+                threshold_end=None,  # open-ended top tier
+            ),
+        ]
+        with UsageStore(":memory:") as store:
+            store.save_tariff(tiered)
+            tier1, tier2 = store.load_tariff(plan="Tiered")
+            assert tier1.threshold_start == 0.0
+            assert tier1.threshold_end == 1000.0
+            assert tier2.threshold_start == 1000.0
+            assert tier2.threshold_end is None
+
+    def test_migrates_pre_threshold_schema(self, tmp_path):
+        """Opening a database created before the threshold columns adds them."""
+        db_path = tmp_path / "old.db"
+        conn = sqlite3.connect(db_path)
+        conn.execute(
+            "CREATE TABLE tariff ("
+            "start_date TEXT NOT NULL, end_date TEXT NOT NULL, "
+            "plan TEXT NOT NULL, name TEXT NOT NULL, price REAL NOT NULL, "
+            "description TEXT, PRIMARY KEY (start_date, end_date, plan, name))"
+        )
+        conn.execute(
+            "INSERT INTO tariff VALUES ('2025-05-01', '2025-10-31', "
+            "'Time-of-Use', 'TOU Off-peak', 8.7, 'old row')"
+        )
+        conn.commit()
+        conn.close()
+
+        with UsageStore(db_path) as store:
+            (old_row,) = store.load_tariff()
+            assert old_row.price == 8.7
+            assert old_row.threshold_start is None  # backfilled as NULL
+            store.save_tariff(SAMPLE_RATES)  # new-format insert works
+            assert len(store.load_tariff()) == 5
 
     def test_empty_db(self):
         with UsageStore(":memory:") as store:
@@ -567,22 +629,25 @@ class TestAsyncUpdate:
 
         assert len(readings) == 1
         args = client.download_usage.call_args[0]
-        assert args[0] == date(2026, 3, 3)   # day after latest
+        # Overlap before the latest stored day (2026-03-02), see update().
+        assert args[0] == date(2026, 3, 2) - timedelta(days=UPDATE_OVERLAP_DAYS)
         assert args[1] == date(2026, 3, 27)   # today
 
     @patch("enovapower.storage.date")
-    async def test_async_update_already_current(self, mock_date):
+    async def test_async_update_refreshes_overlap_when_current(self, mock_date):
         mock_date.today.return_value = date(2026, 3, 1)
         mock_date.side_effect = lambda *args: date(*args)
         mock_date.fromisoformat = date.fromisoformat
 
-        client = _mock_async_client()
+        client = _mock_async_client(readings=_make_readings())
         with UsageStore(":memory:") as store:
             store.save(METER_ID, _make_readings())  # has 2026-03-01
             readings = await store.async_update(client)
 
-        assert readings == []
-        client.download_usage.assert_not_awaited()
+        args = client.download_usage.call_args[0]
+        assert args[0] == date(2026, 3, 1) - timedelta(days=UPDATE_OVERLAP_DAYS)
+        assert args[1] == date(2026, 3, 1)
+        assert len(readings) == 1
 
     async def test_async_update_stores_new_data(self):
         new_row_csv = MINIMAL_CSV.replace("2026-03-01", "2026-03-10")

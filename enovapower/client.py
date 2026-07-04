@@ -12,8 +12,9 @@ are now defined in ``exceptions`` and ``parsers`` respectively.
 from __future__ import annotations
 
 import asyncio
+import logging
 import threading
-from collections.abc import Coroutine
+from collections.abc import Callable, Coroutine
 from datetime import date
 from typing import Any, TypeVar
 
@@ -27,6 +28,10 @@ from enovapower.models import BillingPeriod, TariffRate, UsageReading
 from enovapower.parsers import parse_csv, parse_tariff_html
 
 T = TypeVar("T")
+
+# Synchronous counterpart of async_client.ReauthCallback: returns fresh
+# ``(access_code, password)`` credentials on session expiry.
+SyncReauthCallback = Callable[[], "tuple[str, str]"]
 
 # Re-exports for backward compatibility
 __all__ = [
@@ -55,14 +60,37 @@ class EnovaClient:
         readings = client.download_usage(date(2026, 2, 25), date(2026, 3, 26))
     """
 
-    def __init__(self, retries: int = 3, base_url: str | None = None) -> None:
+    def __init__(
+        self,
+        retries: int = 3,
+        base_url: str | None = None,
+        *,
+        allow_insecure_http: bool = False,
+        clear_credentials_on_close: bool = True,
+        reauth_callback: SyncReauthCallback | None = None,
+        logger: logging.Logger | None = None,
+    ) -> None:
         from enovapower.async_client import AsyncEnovaClient
 
-        kwargs: dict[str, Any] = {"retries": retries}
+        kwargs: dict[str, Any] = {
+            "retries": retries,
+            "allow_insecure_http": allow_insecure_http,
+            "clear_credentials_on_close": clear_credentials_on_close,
+            "logger": logger,
+        }
         if base_url is not None:
             kwargs["base_url"] = base_url
+        if reauth_callback is not None:
+            # The async client expects a coroutine; wrap the sync callable.
+            # It runs on the background loop, which is idle while the sync
+            # caller blocks, so a blocking callback is harmless here.
+            async def _async_reauth() -> tuple[str, str]:
+                return reauth_callback()
+
+            kwargs["reauth_callback"] = _async_reauth
 
         self._async = AsyncEnovaClient(**kwargs)
+        self._closed = False
 
         # Dedicated event loop on a daemon thread.
         self._loop = asyncio.new_event_loop()
@@ -79,13 +107,22 @@ class EnovaClient:
 
     def _run(self, coro: Coroutine[Any, Any, T]) -> T:
         """Submit a coroutine to the background loop and block for its result."""
+        if self._closed:
+            # Submitting to a stopped loop would block forever on .result().
+            coro.close()  # suppress the "never awaited" warning
+            raise EnovaError("EnovaClient is closed")
         return asyncio.run_coroutine_threadsafe(coro, self._loop).result()
 
     def close(self) -> None:
-        """Shut down the async client and background loop."""
+        """Shut down the async client and background loop. Safe to call twice."""
+        if self._closed:
+            return
         self._run(self._async.close())
+        self._closed = True
         self._loop.call_soon_threadsafe(self._loop.stop)
         self._thread.join(timeout=5)
+        if not self._thread.is_alive():
+            self._loop.close()
 
     @property
     def meter_id(self) -> str | None:
@@ -97,7 +134,13 @@ class EnovaClient:
 
     @property
     def account_number(self) -> str | None:
+        """Legacy alias for :attr:`access_code`; see :attr:`AsyncEnovaClient.account_number`."""
         return self._async.account_number
+
+    @property
+    def access_code(self) -> str | None:
+        """The access code (username) this client logged in with."""
+        return self._async.access_code
 
     @property
     def plan(self) -> str | None:

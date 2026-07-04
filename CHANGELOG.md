@@ -1,5 +1,56 @@
 # Changelog
 
+## 0.10.0
+
+### Added
+
+- `Retry-After` support: a numeric header on a retryable status (429/5xx) now
+  sets the retry delay, capped at 30 s; otherwise the exponential backoff is
+  used as before.
+- `access_code` property on both clients — the username the client logged in
+  with. `account_number` remains as a legacy alias (despite its name it has
+  always held the access code).
+- The sync `EnovaClient` now exposes `allow_insecure_http`,
+  `clear_credentials_on_close`, `reauth_callback` (a plain synchronous
+  callable), and `logger`, matching the async client.
+- `UsageStore` persists `TariffRate.threshold_start`/`threshold_end`; existing
+  databases are migrated in place (two nullable columns added).
+
+### Changed
+
+- `UsageStore.update()`/`async_update()` re-fetch the last
+  `UPDATE_OVERLAP_DAYS` (3) stored days in addition to new ones, so portal
+  revisions to recently-published days are picked up. Rows are upserted, so
+  the overlap is idempotent.
+- `parse_csv` now validates the export header (column count, date column,
+  hourly kWh columns) and raises `EnovaError` on a changed layout instead of
+  silently misassigning hours.
+- Response bodies are read incrementally so the 64 MB response cap bounds
+  memory even for chunked responses without a `Content-Length`.
+- `configure_logging()` defaults to `INFO` (was `DEBUG`); pass
+  `level=logging.DEBUG` for request/response tracing.
+- `get_current_plan()` no longer clears the cached `plan` when detection
+  fails; a successful detection still updates it.
+- `login()` no longer retains credentials in memory when a `reauth_callback`
+  is configured — the callback was designed to make retention unnecessary.
+
+### Fixed
+
+- Sync `EnovaClient.close()` is idempotent and releases its background event
+  loop; previously a second `close()` (or any call after it) deadlocked
+  forever, and the loop's file descriptors leaked. Calls after `close()` now
+  raise `EnovaError`.
+- Pickling an `AsyncEnovaClient` that had made requests failed (the live
+  `aiohttp` session isn't picklable); the session is now dropped from the
+  pickled state and recreated on demand after restore.
+- A session expiring between the report request and the CSV/XML export no
+  longer feeds the login page to the parsers (surfacing as a bewildering
+  `Invalid reading date` error) — the client re-logs in and retries the
+  export once, then raises `EnovaSessionExpiredError`.
+- Meter-discovery failures during login are logged instead of silently
+  swallowed, and a login that resolves no meter id warns immediately rather
+  than failing later with a misleading "call login() first".
+
 ## 0.9.0
 
 ### Added

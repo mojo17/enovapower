@@ -87,6 +87,29 @@ def parse_current_plan(html: str) -> str | None:
     return None
 
 
+def _validate_csv_header(header: list[str]) -> None:
+    """Ensure the export header still matches the column layout we assume.
+
+    The parser reads columns *positionally* (date, 24 hourly values, 3 TOU
+    totals), so a reordered or restructured export must fail loudly here
+    rather than silently misassign energy to the wrong hours. The check is
+    deliberately loose about wording (the portal's own header mislabels
+    midnight as "12 pm") — it verifies shape, not exact titles.
+    """
+    if len(header) < _TOU_OFFSET:
+        raise EnovaError(
+            f"Unrecognized CSV header: expected at least {_TOU_OFFSET} columns, "
+            f"got {len(header)}"
+        )
+    if "date" not in header[0].lower():
+        raise EnovaError(f"Unrecognized CSV header: first column is {header[0]!r}")
+    hourly = header[_HOUR_OFFSET:_TOU_OFFSET]
+    if any("kwh" not in col.lower() for col in hourly):
+        raise EnovaError(
+            "Unrecognized CSV header: expected 24 hourly kWh columns after the date"
+        )
+
+
 def parse_csv(raw_csv: str) -> list[UsageReading]:
     """Parse the Enova CSV export into a list of UsageReading objects.
 
@@ -96,15 +119,20 @@ def parse_csv(raw_csv: str) -> list[UsageReading]:
 
     Returns:
         List of UsageReading with hourly kWh, TOU totals, and computed total.
+
+    Raises:
+        EnovaError: If the CSV is empty or its header no longer matches the
+            expected column layout.
     """
     if not raw_csv or not raw_csv.strip():
         raise EnovaError("Cannot parse empty CSV data")
 
     reader = csv.reader(io.StringIO(raw_csv))
     try:
-        next(reader)  # skip header
+        header = next(reader)
     except StopIteration:
-        raise EnovaError("CSV data has no header row")
+        raise EnovaError("CSV data has no header row") from None
+    _validate_csv_header(header)
 
     rows = []
     for row in reader:
@@ -134,7 +162,7 @@ def parse_csv(raw_csv: str) -> list[UsageReading]:
 
         hourly: dict[str, float | None] = {}
         for i, key in enumerate(HOUR_KEYS):
-            val = padded[i + 1].strip().strip('"')
+            val = padded[i + _HOUR_OFFSET].strip().strip('"')
             hourly[key] = _parse_optional_float(val, f"hourly value at {key}")
 
         tou_values = []

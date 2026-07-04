@@ -39,15 +39,21 @@ CREATE TABLE IF NOT EXISTS usage (
 
 _CREATE_TARIFF_TABLE = """
 CREATE TABLE IF NOT EXISTS tariff (
-    start_date  TEXT NOT NULL,
-    end_date    TEXT NOT NULL,
-    plan        TEXT NOT NULL,
-    name        TEXT NOT NULL,
-    price       REAL NOT NULL,
-    description TEXT,
+    start_date      TEXT NOT NULL,
+    end_date        TEXT NOT NULL,
+    plan            TEXT NOT NULL,
+    name            TEXT NOT NULL,
+    price           REAL NOT NULL,
+    description     TEXT,
+    threshold_start REAL,
+    threshold_end   REAL,
     PRIMARY KEY (start_date, end_date, plan, name)
 )
 """
+
+# Columns added after the tariff table first shipped; existing databases are
+# migrated in place (see _migrate_tariff_table).
+_TARIFF_MIGRATION_COLS = ("threshold_start", "threshold_end")
 
 _INSERT = """
 INSERT OR REPLACE INTO usage (meter_id, date, {cols})
@@ -58,9 +64,18 @@ VALUES (?, ?, {placeholders})
 )
 
 _INSERT_TARIFF = """
-INSERT OR REPLACE INTO tariff (start_date, end_date, plan, name, price, description)
-VALUES (?, ?, ?, ?, ?, ?)
+INSERT OR REPLACE INTO tariff (
+    start_date, end_date, plan, name, price, description,
+    threshold_start, threshold_end
+)
+VALUES (?, ?, ?, ?, ?, ?, ?, ?)
 """
+
+# Days re-downloaded before the last stored date on update(): the portal
+# publishes in arrears and revises recent days, so the tail of the store is
+# frequently partial when first written. Re-fetching a small overlap picks up
+# those revisions (rows are upserted, so this is idempotent).
+UPDATE_OVERLAP_DAYS = 3
 
 
 class UsageStore:
@@ -84,8 +99,16 @@ class UsageStore:
         self._restrict_permissions()
         self._conn.execute(_CREATE_TABLE)
         self._conn.execute(_CREATE_TARIFF_TABLE)
+        self._migrate_tariff_table()
         self._conn.commit()
         self._log = logger if logger is not None else get_logger()
+
+    def _migrate_tariff_table(self) -> None:
+        """Add tariff columns introduced after a database was first created."""
+        existing = {row[1] for row in self._conn.execute("PRAGMA table_info(tariff)")}
+        for col in _TARIFF_MIGRATION_COLS:
+            if col not in existing:
+                self._conn.execute(f"ALTER TABLE tariff ADD COLUMN {col} REAL")
 
     def _restrict_permissions(self) -> None:
         """Restrict the DB file to owner-only (0600).
@@ -249,6 +272,8 @@ class UsageStore:
                     r.name,
                     float(r.price),
                     r.description,
+                    r.threshold_start,
+                    r.threshold_end,
                 )
             )
 
@@ -272,7 +297,10 @@ class UsageStore:
         Returns:
             List of TariffRate ordered by start_date, plan, name.
         """
-        query = "SELECT start_date, end_date, plan, name, price, description FROM tariff WHERE 1=1"
+        query = (
+            "SELECT start_date, end_date, plan, name, price, description, "
+            "threshold_start, threshold_end FROM tariff WHERE 1=1"
+        )
         params: list[str] = []
 
         if plan is not None:
@@ -298,6 +326,8 @@ class UsageStore:
                 name=row[3],
                 price=row[4],
                 description=row[5] or "",
+                threshold_start=row[6],
+                threshold_end=row[7],
             )
             for row in rows
         ]
@@ -331,13 +361,17 @@ class UsageStore:
     def update(self, client: SyncClientProtocol) -> list[UsageReading]:
         """Download new data since the last stored record and save it.
 
+        Re-fetches the last ``UPDATE_OVERLAP_DAYS`` stored days as well: the
+        portal publishes in arrears and revises recent days, so the newest
+        stored rows are often partial. Overlapping rows are upserted in place.
         If no prior data exists, falls back to ``seed()``.
 
         Args:
             client: An authenticated EnovaClient.
 
         Returns:
-            List of newly downloaded readings (may be empty).
+            List of downloaded readings — new days plus the refreshed overlap
+            (may be empty).
 
         Raises:
             enova.client.EnovaError: If the client is not logged in.
@@ -347,7 +381,7 @@ class UsageStore:
             self._log.info("No existing data, falling back to seed()")
             return self.seed(client)
 
-        from_date = latest + timedelta(days=1)
+        from_date = latest - timedelta(days=UPDATE_OVERLAP_DAYS)
         to_date = date.today()
 
         if from_date > to_date:
@@ -387,13 +421,14 @@ class UsageStore:
         return readings
 
     async def async_update(self, client: AsyncClientProtocol) -> list[UsageReading]:
-        """Async version of :meth:`update`.
+        """Async version of :meth:`update` (same revision-overlap behavior).
 
         Args:
             client: An authenticated AsyncEnovaClient.
 
         Returns:
-            List of newly downloaded readings (may be empty).
+            List of downloaded readings — new days plus the refreshed overlap
+            (may be empty).
         """
         loop = asyncio.get_running_loop()
         latest = await loop.run_in_executor(
@@ -403,7 +438,7 @@ class UsageStore:
             self._log.info("No existing data, falling back to async_seed()")
             return await self.async_seed(client)
 
-        from_date = latest + timedelta(days=1)
+        from_date = latest - timedelta(days=UPDATE_OVERLAP_DAYS)
         to_date = date.today()
 
         if from_date > to_date:

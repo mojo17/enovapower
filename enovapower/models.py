@@ -134,7 +134,10 @@ class BillingPeriod:
     """A single billing cycle from the consumption inquiry report.
 
     Attributes:
-        start_date: First day of the cycle (the previous read date).
+        start_date: The previous cycle's read date — an **exclusive** bound.
+            The cycle covers the days ``start_date < d <= end_date`` (its
+            first billed day is ``start_date + 1``), which is what makes
+            ``end_date - start_date`` equal ``days``.
         end_date: The meter read date that closes the cycle.
         days: Number of days in the cycle.
         usage_kwh: Total kWh billed for the cycle.

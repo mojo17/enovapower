@@ -78,12 +78,28 @@ class TestParseCsv:
         assert r.total == pytest.approx(hour_sum)
 
     def test_parse_empty_csv(self):
-        """Header-only CSV returns empty list."""
-        header_only = (
-            '"Reading Date","1 am kWh Usage","2 am kWh Usage"\n'
-        )
+        """Header-only CSV (no data rows) returns empty list."""
+        header_only = MINIMAL_CSV.split("\n")[0] + "\n"
         readings = parse_csv(header_only)
         assert readings == []
+
+    def test_parse_csv_rejects_truncated_header(self):
+        """A header with too few columns must fail loudly, not misparse."""
+        header_only = '"Reading Date","1 am kWh Usage","2 am kWh Usage"\n'
+        with pytest.raises(EnovaError, match="Unrecognized CSV header"):
+            parse_csv(header_only)
+
+    def test_parse_csv_rejects_reordered_header(self):
+        """Non-date first column means the layout changed under us."""
+        bad = MINIMAL_CSV.replace('"Reading Date"', '"Meter Number"', 1)
+        with pytest.raises(EnovaError, match="first column"):
+            parse_csv(bad)
+
+    def test_parse_csv_rejects_non_kwh_hourly_columns(self):
+        """An inserted non-kWh column shifts everything; must fail loudly."""
+        bad = MINIMAL_CSV.replace('"1 am kWh Usage"', '"Temperature"', 1)
+        with pytest.raises(EnovaError, match="hourly kWh columns"):
+            parse_csv(bad)
 
     def test_parse_csv_with_trailing_blanks_and_notes(self):
         """Rows with blank lines and *Note are skipped."""
@@ -384,6 +400,62 @@ class TestSyncFacade:
     def test_base_url_passthrough(self):
         client = EnovaClient(base_url="https://custom.example.com")
         assert client._async._base_url == "https://custom.example.com"
+        client.close()
+
+    def test_access_code_property(self):
+        client = EnovaClient()
+        client._async._account_number = "user@example.com"
+        assert client.access_code == "user@example.com"
+        client.close()
+
+    def test_close_is_idempotent(self):
+        """A second close() must be a no-op, not a deadlock."""
+        client = EnovaClient()
+        client.close()
+        client.close()
+
+    def test_method_after_close_raises(self):
+        """Calls after close() must raise, not block forever on a dead loop."""
+        client = EnovaClient()
+        client.close()
+        with pytest.raises(EnovaError, match="closed"):
+            client.download_usage(date(2026, 3, 1), date(2026, 3, 1))
+
+    def test_close_releases_loop(self):
+        client = EnovaClient()
+        client.close()
+        assert not client._thread.is_alive()
+        assert client._loop.is_closed()
+
+    def test_allow_insecure_http_passthrough(self):
+        client = EnovaClient(
+            base_url="http://localhost:8080", allow_insecure_http=True
+        )
+        assert client._async._base_url == "http://localhost:8080"
+        client.close()
+
+    def test_reauth_callback_wrapped_for_async(self):
+        calls = []
+
+        def sync_cb():
+            calls.append(1)
+            return ("cb_user", "cb_pass")
+
+        client = EnovaClient(reauth_callback=sync_cb)
+        try:
+            wrapped = client._async._reauth_callback
+            assert wrapped is not None
+            assert client._run(wrapped()) == ("cb_user", "cb_pass")
+            assert calls == [1]
+        finally:
+            client.close()
+
+    def test_logger_passthrough(self):
+        import logging
+
+        custom = logging.getLogger("custom.enova")
+        client = EnovaClient(logger=custom)
+        assert client._async._log is custom
         client.close()
 
 
