@@ -1,5 +1,13 @@
 # Changelog
 
+## Unreleased
+
+### Security
+
+- Raised the minimum `aiohttp` to `>=3.14.4`: 3.14.1–3.14.3 are affected by 11
+  advisories fixed in 3.14.4. Inside Home Assistant this requires HA 2026.10 or
+  later, the first release that pins aiohttp 3.14.4+.
+
 ## 0.11.0
 
 ### Fixed

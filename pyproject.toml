@@ -27,9 +27,11 @@ classifiers = [
 ]
 dependencies = [
     "beautifulsoup4>=4.12",
-    # 3.14.1 excludes the versions affected by the 2026 client-side CVEs
-    # (fixed in aiohttp 3.14.0/3.14.1).
-    "aiohttp>=3.14.1",
+    # 3.14.4 is the first release free of every advisory known as of
+    # 2026-11 (the 2026 client-side CVEs fixed in 3.14.0/3.14.1, plus 11 more
+    # fixed in 3.14.4). Home Assistant pins aiohttp itself, so this floor means
+    # HA >= 2026.10 (which ships 3.14.4+); the integration declares that minimum.
+    "aiohttp>=3.14.4",
     # Safe XML parsing for Green Button exports (guards entity-expansion).
     "defusedxml>=0.7",
     # IANA timezone data for America/Toronto where the OS lacks it.
